@@ -236,6 +236,7 @@ fill_probe(void) {
         "sceAppInstUtilInitialize",
         "sceAppInstUtilAppInstallPkg",
         "sceAppInstUtilAppInstallTitleDir",     /* takes an explicit title id */
+        "sceAppInstUtilAppInstallAll",          /* tile fallback on 13.xx */
         "sceAppInstUtilInstallByPackage",
         "sceAppInstUtilInstallByPackageEx",
         "sceAppInstUtilGetTitleIdFromPkg",

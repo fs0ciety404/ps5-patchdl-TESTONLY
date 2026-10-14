@@ -46,6 +46,7 @@ INCASSET(tile_icon0_png,  "assets/icon0.png");
 typedef int (*ai_init_fn)(void);
 typedef int (*ai_install_dir_fn)(const char *title_id, const char *parent_dir,
                                   void *opts);
+typedef int (*ai_install_all_fn)(void *opts);
 
 static intptr_t
 dynsym_by_name(const char *sym) {
@@ -117,22 +118,28 @@ patchdl_tile_install_if_needed(char *msg, size_t msg_sz) {
     char sce_sys_dir[160];
     char param_path[192];
     char icon_path[192];
+    char receipt_path[192];
 
     ai_init_fn        ai_initialize    = NULL;
     ai_install_dir_fn ai_install_title = NULL;
+    ai_install_all_fn ai_install_all   = NULL;
     int               rc;
 
     snprintf(base_dir,    sizeof base_dir,    "/user/app/%s",                  TILE_TITLE_ID);
     snprintf(sce_sys_dir, sizeof sce_sys_dir, "/user/app/%s/sce_sys",          TILE_TITLE_ID);
     snprintf(param_path,  sizeof param_path,  "/user/app/%s/sce_sys/param.json", TILE_TITLE_ID);
     snprintf(icon_path,   sizeof icon_path,   "/user/app/%s/sce_sys/icon0.png",  TILE_TITLE_ID);
+    /* Written only after the installer accepted the tile. Without it, files
+       left behind by a failed registration would pass the stat-guard below
+       and the tile would never be retried. */
+    snprintf(receipt_path, sizeof receipt_path, "/user/app/%s/.patchdl_registered", TILE_TITLE_ID);
 
     /* stat-guard: if everything on disk already matches, do nothing. Re-running
        the install API every payload start would be wasted work and burns the
        only safe path through Sony's installer state machine. */
     {
         struct stat st;
-        if (stat(base_dir, &st) == 0 &&
+        if (stat(receipt_path, &st) == 0 &&
             file_matches(param_path, tile_param_json, tile_param_json_size) &&
             file_matches(icon_path,  tile_icon0_png,  tile_icon0_png_size)) {
             snprintf(msg, msg_sz, "tile already installed and up to date");
@@ -165,8 +172,14 @@ patchdl_tile_install_if_needed(char *msg, size_t msg_sz) {
     if (!ai_install_title)
         ai_install_title = (ai_install_dir_fn)dynsym_by_name(
             "sceAppInstUtilAppInstallTitleDir");
-    if (!ai_install_title) {
-        snprintf(msg, msg_sz, "sceAppInstUtilAppInstallTitleDir not resolved");
+    /* Firmware 13.xx no longer exports AppInstallTitleDir. AppInstallAll
+       rescans /user/app and registers the tile directory the same way. */
+    if (!ai_install_title)
+        ai_install_all = (ai_install_all_fn)dynsym_by_name(
+            "sceAppInstUtilAppInstallAll");
+    if (!ai_install_title && !ai_install_all) {
+        snprintf(msg, msg_sz,
+                 "neither AppInstallTitleDir nor AppInstallAll resolved");
         return -1;
     }
 
@@ -192,6 +205,7 @@ patchdl_tile_install_if_needed(char *msg, size_t msg_sz) {
         return -1;
     }
 
+    unlink(receipt_path);
     if (write_all(param_path, tile_param_json, tile_param_json_size)) {
         snprintf(msg, msg_sz, "write param.json failed errno=%d", errno);
         return -1;
@@ -201,14 +215,17 @@ patchdl_tile_install_if_needed(char *msg, size_t msg_sz) {
         return -1;
     }
 
-    rc = ai_install_title(TILE_TITLE_ID, "/user/app/", NULL);
+    rc = ai_install_title ? ai_install_title(TILE_TITLE_ID, "/user/app/", NULL)
+                          : ai_install_all(NULL);
     if (rc != 0) {
-        snprintf(msg, msg_sz,
-                 "AppInstallTitleDir(%s) returned 0x%08x",
+        snprintf(msg, msg_sz, "%s(%s) returned 0x%08x",
+                 ai_install_title ? "AppInstallTitleDir" : "AppInstallAll",
                  TILE_TITLE_ID, (unsigned)rc);
         return -1;
     }
 
-    snprintf(msg, msg_sz, "tile installed (%s)", TILE_TITLE_ID);
+    (void)write_all(receipt_path, (const uint8_t *)"1", 1);
+    snprintf(msg, msg_sz, "tile installed (%s via %s)", TILE_TITLE_ID,
+             ai_install_title ? "AppInstallTitleDir" : "AppInstallAll");
     return 0;
 }
