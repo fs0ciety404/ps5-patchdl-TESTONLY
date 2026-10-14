@@ -13,7 +13,7 @@
 <p align="center">
   <img src="https://img.shields.io/github/v/release/knutwurst/ps5-patchdl?style=for-the-badge&label=release&color=22c55e" alt="Latest release">
   <img src="https://img.shields.io/github/downloads/knutwurst/ps5-patchdl/total?style=for-the-badge&color=22c55e" alt="Downloads">
-  <img src="https://img.shields.io/badge/FW%2011.60-tested-22c55e?style=for-the-badge" alt="Tested on firmware 11.60">
+  <img src="https://img.shields.io/badge/FW-11.60%20%C2%B7%2013.60-22c55e?style=for-the-badge" alt="Firmware 11.60 and 13.60">
   <img src="https://img.shields.io/badge/UI-any%20browser-22c55e?style=for-the-badge" alt="Web UI in any browser">
   <img src="https://img.shields.io/github/license/knutwurst/ps5-patchdl?style=for-the-badge&color=3a3a3a" alt="License">
 </p>
@@ -65,7 +65,7 @@ Start an update from the couch with your phone, check on it from your laptop, or
 3. A notification on the TV shows the address, for example `http://192.168.0.42:12880/`. Open it in any browser on your network.
 4. Optional: switch on **Home-screen shortcut** in Settings to get the PatchDL tile.
 
-**You need** a PS5 that can load ELF payloads. PatchDL is tested on firmware 11.60.
+**You need** a PS5 that can load ELF payloads. PatchDL runs on firmware 11.60 and 13.60.
 
 ## Good to know
 
