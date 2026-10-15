@@ -32,7 +32,7 @@
 - **Update all.** One click queues every game that has an update. PatchDL works through the queue and installs each update as soon as it lands.
 - **Fast downloads.** Up to 16 parallel connections per update. Change the number in Settings while a download runs.
 - **Survives reboots.** Pause, resume, or lose power: PatchDL saves progress after every finished piece and continues where it stopped.
-- **Made for your firmware.** You only see updates your console can run. When the newest one needs a newer firmware, PatchDL says so: *Needs FW 13.20*.
+- **Made for your firmware.** You only see updates your console can run. When Sony's newest patch needs a newer firmware, PatchDL finds the newest one that still runs on yours and helps you get it: scan a QR code with your phone, copy one link, and the PS5 does the rest.
 - **Knows where each game came from.** PatchDL checks every game's package and recognizes disc and PlayStation Store installs. It only ever patches games Sony signed.
 - **Checked against Sony's checksums.** Turn on verification and PatchDL compares every piece with the SHA-256 Sony publishes for it.
 - **A tile on your home screen.** One toggle adds PatchDL to the PS5 home screen. Tap it and the UI opens in the console's browser.
@@ -80,7 +80,10 @@ No. It fetches updates for games that are already installed on your console. Not
 Games you installed from disc or from the PlayStation Store. PatchDL reads each game's package before it offers anything, and it leaves every other title alone.
 
 **Where do the updates come from?**
-From Sony's official update servers, the same files your console downloads on its own. PatchDL only talks to a short list of PlayStation CDN hosts.
+From Sony's official update servers, the same files your console downloads on its own. PatchDL downloads only from a short list of PlayStation CDN hosts. To find older patches it also asks [Prospero Patches](https://prosperopatches.com/) which versions exist for a game. That lookup sends the game's title ID and nothing else.
+
+**Can I get an older patch that runs on my firmware?**
+Yes. Sony still hosts older patches, but its servers only tell your console about the newest one. When that one needs a newer firmware, PatchDL looks up the version history on [Prospero Patches](https://prosperopatches.com/) and lists the game under *Updates* with an **Old FW patch** button. Tap it and scan the QR code with your phone. Open the game on Prospero, pick the version PatchDL names, pass the human check and copy the **SC** link. Paste it on your phone, and the PS5 downloads the patch from Sony and handles it like any other update.
 
 **Does it change the updates?**
 No. Each package stays exactly as Sony published it, and the console's own installer applies it.
@@ -121,7 +124,7 @@ PS5_HOST=<console-ip> scripts/deploy_ps5.sh
 
 ## Credits
 
-PatchDL is written in C and builds on [libmicrohttpd](https://www.gnu.org/software/libmicrohttpd/), [libcurl](https://curl.se/), [OpenSSL](https://www.openssl.org/), [SQLite](https://sqlite.org/) and the [ps5-payload-dev SDK](https://github.com/ps5-payload-dev/sdk). Thanks to everyone behind them.
+PatchDL is written in C and builds on [libmicrohttpd](https://www.gnu.org/software/libmicrohttpd/), [libcurl](https://curl.se/), [OpenSSL](https://www.openssl.org/), [SQLite](https://sqlite.org/) and the [ps5-payload-dev SDK](https://github.com/ps5-payload-dev/sdk). The version history behind older patches comes from [Prospero Patches](https://prosperopatches.com/). Thanks to everyone behind them.
 
 ## License
 
