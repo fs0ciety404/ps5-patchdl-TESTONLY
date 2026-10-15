@@ -13,7 +13,7 @@ const iconCache = new Map();
 const SOURCE_TYPES = {
   official:    { label: "Official",    className: "ok",       installAllowed: true,  description: "Native console installation" },
   external:    { label: "External",    className: "external", installAllowed: true,  description: "Real external installation" },
-  shadowmount: { label: "Shadowmount", className: "shadow",   installAllowed: false, description: "Download only" },
+  shadowmount: { label: "Shadowmount", className: "shadow",   installAllowed: false, description: "Not supported" },
   unknown:     { label: "Unknown",     className: "blocked",  installAllowed: false, description: "Blocked" },
   fake:        { label: "Fake package", className: "blocked", installAllowed: false, description: "Not supported" },
 };
@@ -40,7 +40,7 @@ const fallback = {
     source_policy: {
       official: { allow_check: true, allow_download: true, allow_install: true },
       external: { allow_check: true, allow_download: true, allow_install: true },
-      shadowmount: { allow_check: true, allow_download: true, allow_install: false },
+      shadowmount: { allow_check: true, allow_download: false, allow_install: false },
       unknown: { allow_check: true, allow_download: false, allow_install: false },
       fake: { allow_check: true, allow_download: false, allow_install: false },
     },
@@ -76,7 +76,7 @@ const fallback = {
       latest_version: "01.009.000", latest_required_fw: "12.00",
       source_type: "shadowmount", source_path: "/system_ex/app/PPSA90001_00",
       patch_storage_match: true,
-      mount_from: "/mnt/usb0/itemzflow/Shadowmounted Test Title", enabled: true, status: "available",
+      mount_from: "/mnt/usb0/itemzflow/Shadowmounted Test Title", enabled: true, status: "blocked",
     },
     {
       title_id: "PPSA03396", name: "The Last of Us Part I",
@@ -353,8 +353,7 @@ function renderGames() {
 // Prospero) and whether it installs or only downloads is shown on the card.
 function gameCategory(game) {
   const policy = sourcePolicy(game);
-  // Not supported = PatchDL can't install it. Download-only sources (Shadowmount)
-  // still offer the download on the card.
+  // Not supported = PatchDL can't install it (fake packages, mounted images).
   if (game.patch_title_match === false || !policy.allow_install)
     return "blocked";
   if (game.downloading || game.resumable || game.downloaded || game.installing || game._jobState)
@@ -523,9 +522,7 @@ function primaryButton(game) {
   if (game.patch_title_match === false) return null;
   if (regionLockedUpdate(game) && !game.downloading && !game.resumable && !game.downloaded) return null;
   if (canGetOlderPatch(game))
-    return sourcePolicy(game).allow_install
-      ? { label: "Old FW patch", action: "guide", variant: "update", hint: `Get ${game.prospero_version} from Prospero Patches, the newest patch that runs on this firmware.` }
-      : { label: "Old FW download", action: "guide", variant: "update", hint: `Download ${game.prospero_version} from Prospero Patches. PatchDL can't install patches for this game.` };
+    return { label: "Old FW patch", action: "guide", variant: "update", hint: `Get ${game.prospero_version} from Prospero Patches, the newest patch that runs on this firmware.` };
   if (game.resumable && isDownloadAllowed(game))
     return { label: "Resume", action: "download", variant: "update", hint: "Continue the paused download where it stopped." };
   const hasPatch = game.status === "available" || Boolean(game.manual_version);
@@ -585,16 +582,11 @@ function versionsHtml(game) {
 function statusPill(game) {
   if (game.installing) return `<span class="pill warn">Installing…</span>`;
   if (game.status === "checking") return `<span class="pill">Checking…</span>`;
-  if (game.status === "blocked" || sourceType(game) === "fake")
+  if (game.status === "blocked" || !sourcePolicy(game).allow_install)
     return `<span class="pill">Not supported</span>`;
   if (game.patch_title_match === false) return `<span class="pill blocked">Title mismatch</span>`;
-  if (!sourcePolicy(game).allow_install && sourcePolicy(game).allow_download &&
-      (game.status === "available" || game.manual_version || hasOlderPatch(game)))
-    return `<span class="pill warn">Download only</span>`;
   if (game.manual_version || hasOlderPatch(game)) return `<span class="pill prospero">Via Prospero</span>`;
   if (regionLockedUpdate(game)) return `<span class="pill blocked">Region patch \u00b7 can't install</span>`;
-  if (game.status === "available" && !sourcePolicy(game).allow_install)
-    return `<span class="pill warn">Download only</span>`;
   if (game.status === "available") return `<span class="pill ok">Update available</span>`;
   if (game.status === "incompatible_fw")
     return `<span class="pill">Newest needs FW ${escapeHtml(game.latest_required_fw || "?")}</span>`;
@@ -1130,6 +1122,7 @@ const REASON_TEXT = {
   install_not_allowed_for_source: "Install blocked for this source.",
   source_unknown: "Source unknown — blocked.",
   source_fake: "Fake packages are not supported.",
+  source_shadowmount: "Shadowmount titles are not supported.",
   no_compatible_patch: "No compatible patch available.",
   download_failed: "Download failed.",
   download_in_progress: "Another download is already running.",
@@ -1460,7 +1453,7 @@ function openGuide(game, fromLink = false) {
          </div></div>`
       : "";
     body = `
-      <p class="guide-why">Sony only offers ${escapeHtml(game.latest_version || "the newest patch")}, which needs FW ${escapeHtml(game.latest_required_fw || "?")}. Prospero Patches still lists <b>${ver}</b>, which runs on FW ${escapeHtml(game.prospero_required_fw || "?")}.${sourcePolicy(game).allow_install ? "" : " PatchDL only downloads it: patches for this game can't be installed."}</p>
+      <p class="guide-why">Sony only offers ${escapeHtml(game.latest_version || "the newest patch")}, which needs FW ${escapeHtml(game.latest_required_fw || "?")}. Prospero Patches still lists <b>${ver}</b>, which runs on FW ${escapeHtml(game.prospero_required_fw || "?")}.</p>
       ${handoff}
       <ol class="guide-steps">
         <li>
