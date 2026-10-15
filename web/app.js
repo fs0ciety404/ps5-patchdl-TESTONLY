@@ -353,7 +353,9 @@ function renderGames() {
 // Prospero) and whether it installs or only downloads is shown on the card.
 function gameCategory(game) {
   const policy = sourcePolicy(game);
-  if (game.patch_title_match === false || (!policy.allow_download && !policy.allow_install))
+  // Not supported = PatchDL can't install it. Download-only sources (Shadowmount)
+  // still offer the download on the card.
+  if (game.patch_title_match === false || !policy.allow_install)
     return "blocked";
   if (game.downloading || game.resumable || game.downloaded || game.installing || game._jobState)
     return "updates";
@@ -521,7 +523,9 @@ function primaryButton(game) {
   if (game.patch_title_match === false) return null;
   if (regionLockedUpdate(game) && !game.downloading && !game.resumable && !game.downloaded) return null;
   if (canGetOlderPatch(game))
-    return { label: "Old FW patch", action: "guide", variant: "update", hint: `Get ${game.prospero_version} from Prospero Patches, the newest patch that runs on this firmware.` };
+    return sourcePolicy(game).allow_install
+      ? { label: "Old FW patch", action: "guide", variant: "update", hint: `Get ${game.prospero_version} from Prospero Patches, the newest patch that runs on this firmware.` }
+      : { label: "Old FW download", action: "guide", variant: "update", hint: `Download ${game.prospero_version} from Prospero Patches. PatchDL can't install patches for this game.` };
   if (game.resumable && isDownloadAllowed(game))
     return { label: "Resume", action: "download", variant: "update", hint: "Continue the paused download where it stopped." };
   const hasPatch = game.status === "available" || Boolean(game.manual_version);
@@ -581,11 +585,15 @@ function versionsHtml(game) {
 function statusPill(game) {
   if (game.installing) return `<span class="pill warn">Installing…</span>`;
   if (game.status === "checking") return `<span class="pill">Checking…</span>`;
-  if (sourceType(game) === "fake") return `<span class="pill">Not supported</span>`;
+  if (game.status === "blocked" || sourceType(game) === "fake")
+    return `<span class="pill">Not supported</span>`;
   if (game.patch_title_match === false) return `<span class="pill blocked">Title mismatch</span>`;
+  if (!sourcePolicy(game).allow_install && sourcePolicy(game).allow_download &&
+      (game.status === "available" || game.manual_version || hasOlderPatch(game)))
+    return `<span class="pill warn">Download only</span>`;
   if (game.manual_version || hasOlderPatch(game)) return `<span class="pill prospero">Via Prospero</span>`;
   if (regionLockedUpdate(game)) return `<span class="pill blocked">Region patch \u00b7 can't install</span>`;
-  if (game.status === "available" && !isInstallAllowed(game))
+  if (game.status === "available" && !sourcePolicy(game).allow_install)
     return `<span class="pill warn">Download only</span>`;
   if (game.status === "available") return `<span class="pill ok">Update available</span>`;
   if (game.status === "incompatible_fw")
@@ -595,7 +603,8 @@ function statusPill(game) {
 }
 
 function storagePill(game) {
-  return hasSharedStorage(game) && !regionLockedUpdate(game) ? `<span class="pill warn">Shared master</span>` : "";
+  return hasSharedStorage(game) && sourcePolicy(game).allow_install && !regionLockedUpdate(game)
+    ? `<span class="pill warn">Shared master</span>` : "";
 }
 
 function sourcePill(game) {
@@ -1451,12 +1460,12 @@ function openGuide(game, fromLink = false) {
          </div></div>`
       : "";
     body = `
-      <p class="guide-why">Sony only offers ${escapeHtml(game.latest_version || "the newest patch")}, which needs FW ${escapeHtml(game.latest_required_fw || "?")}. Prospero Patches still lists <b>${ver}</b>, which runs on FW ${escapeHtml(game.prospero_required_fw || "?")}.</p>
+      <p class="guide-why">Sony only offers ${escapeHtml(game.latest_version || "the newest patch")}, which needs FW ${escapeHtml(game.latest_required_fw || "?")}. Prospero Patches still lists <b>${ver}</b>, which runs on FW ${escapeHtml(game.prospero_required_fw || "?")}.${sourcePolicy(game).allow_install ? "" : " PatchDL only downloads it: patches for this game can't be installed."}</p>
       ${handoff}
       <ol class="guide-steps">
         <li>
           <div class="guide-step-text"><strong>Open Prospero Patches</strong>
-            <span>Tap version <b>${ver}</b>${size} and complete the “I am human” check.</span></div>
+            <span>Tap version <b>${ver}</b>${size}. If a human check shows up, confirm it.</span></div>
           <a class="row-button is-update guide-open" href="https://prosperopatches.com/${encodeURIComponent(game.title_id)}" target="_blank" rel="noopener">Open Prospero</a>
         </li>
         <li>
