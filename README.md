@@ -1,7 +1,7 @@
 <h1 align="center">PatchDL</h1>
 
 <p align="center">
-  <img src="docs/images/hero.jpg" alt="PatchDL in a desktop browser and on a phone, downloading a game update" width="900">
+  <img src="docs/images/hero.jpg" alt="PatchDL in a desktop browser and on a phone, fetching a patch that runs on an older firmware" width="900">
 </p>
 
 <p align="center">
@@ -46,7 +46,7 @@
     <td align="center" width="50%"><img src="docs/images/library.jpg" width="420" alt="Full library with game icons, sorted by name"><br><sub><b>Library</b> &nbsp;·&nbsp; icons, versions and firmware needs, A to Z</sub></td>
   </tr>
   <tr>
-    <td align="center" width="50%"><img src="docs/images/queue.jpg" width="420" alt="Updating view with two queued updates"><br><sub><b>Updating</b> &nbsp;·&nbsp; the queue, next to the download that's running</sub></td>
+    <td align="center" width="50%"><img src="docs/images/oldfw.jpg" width="420" alt="QR code on the TV and the step-by-step guide on a phone"><br><sub><b>Older firmware</b> &nbsp;·&nbsp; scan on the TV, paste one link on your phone</sub></td>
     <td align="center" width="50%"><img src="docs/images/settings.jpg" width="420" alt="Settings view"><br><sub><b>Settings</b> &nbsp;·&nbsp; changes apply right away, no restart</sub></td>
   </tr>
   <tr>
@@ -59,7 +59,7 @@
 Start an update from the couch with your phone, check on it from your laptop, or open it on the TV. The UI adapts to whatever screen it's on.
 
 <p align="center">
-  <img src="docs/images/phones.jpg" alt="PatchDL on a phone: game list with a download, and Settings" width="560">
+  <img src="docs/images/phones.jpg" alt="PatchDL on a phone: game list and Settings" width="560">
 </p>
 
 ## Get started
@@ -83,7 +83,7 @@ Games you installed from disc or from the PlayStation Store. PatchDL reads each 
 From Sony's official update servers, the same files your console downloads on its own. PatchDL downloads only from a short list of PlayStation CDN hosts. To find older patches it also asks [Prospero Patches](https://prosperopatches.com/) which versions exist for a game. That lookup sends the game's title ID and nothing else.
 
 **Can I get an older patch that runs on my firmware?**
-Yes. Sony still hosts older patches, but its servers only tell your console about the newest one. When that one needs a newer firmware, PatchDL looks up the version history on [Prospero Patches](https://prosperopatches.com/) and lists the game under *Updates* with an **Old FW patch** button. Tap it and scan the QR code with your phone. Open the game on Prospero, pick the version PatchDL names, pass the human check and copy the **SC** link. Paste it on your phone, and the PS5 downloads the patch from Sony and handles it like any other update.
+Yes. Sony still hosts older patches, but its servers only tell your console about the newest one. When that one needs a newer firmware, PatchDL looks up the version history on [Prospero Patches](https://prosperopatches.com/) and lists the game under *Updates* with an **Old FW patch** button. Tap it and scan the QR code with your phone. Open the game on Prospero, pick the version PatchDL names (confirm the human check if one shows up) and copy the **SC** link. Paste it on your phone, and the PS5 downloads the patch from Sony and handles it like any other update.
 
 **Does it change the updates?**
 No. Each package stays exactly as Sony published it, and the console's own installer applies it.
