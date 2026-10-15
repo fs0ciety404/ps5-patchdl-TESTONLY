@@ -535,8 +535,8 @@ function stopButton(game) {
   return null;
 }
 
-// Installed -> what PatchDL can get for this console -> newest overall (only
-// when that one is out of reach because of the firmware).
+// Installed -> what PatchDL can get for this console -> newest overall with
+// the firmware it needs (left out when it's the same as the offered update).
 function versionsHtml(game) {
   const v = (x) => `<b>${escapeHtml(x)}</b>`;
   const parts = [`<span>Installed ${v(game.installed_version || "--")}</span>`];
@@ -557,8 +557,7 @@ function versionsHtml(game) {
   const job = state.downloads.find((d) => d.title_id === game.title_id);
   if (job && job.state === "error" && Number(job.rc) === -3)
     parts.push(`<span class="card-note is-warn">${noSpaceText(job.need_bytes, job.free_bytes)}</span>`);
-  if (game.latest_version && game.latest_version !== offered &&
-      game.latest_version > (game.installed_version || "")) {
+  if (game.latest_version && game.latest_version !== offered) {
     const fw = game.latest_required_fw ? ` · needs FW ${escapeHtml(game.latest_required_fw)}` : "";
     parts.push(`<span>Newest ${v(game.latest_version)}${fw}</span>`);
   }
