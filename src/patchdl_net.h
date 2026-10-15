@@ -29,6 +29,13 @@ void patchdl_net_global_cleanup(void);
 
 int patchdl_http_get(const char *url, patchdl_buf_t *out);
 
+/* External-host variants: no Sony CA pinning, no Sony host allowlist.
+   SSL peer verification is disabled (PS5 has no system CA store; these
+   are used for public metadata only, never for sensitive data). */
+int patchdl_http_get_external(const char *url, patchdl_buf_t *out);
+int patchdl_http_post_external(const char *url, const char *content_type,
+                               const char *body, patchdl_buf_t *out);
+
 /* ---- parallel piece download (used by the connection pool) ------------- */
 
 /* One piece of a split manifest package. `url` is heap-allocated. */
@@ -50,6 +57,7 @@ typedef struct {
    -1 on fetch/parse/tiling failure. */
 int  patchdl_fetch_manifest(const char *manifest_url, patchdl_manifest_t *out);
 void patchdl_manifest_free(patchdl_manifest_t *m);
+
 
 /* Live state shared with one in-flight piece download. The worker owns these;
    the curl callbacks read `abort` (set elsewhere) and publish progress into

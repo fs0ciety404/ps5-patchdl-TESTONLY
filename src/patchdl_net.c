@@ -353,6 +353,90 @@ patchdl_http_get(const char *url, patchdl_buf_t *out) {
     return 0;
 }
 
+/* ---------- external-host HTTP (no Sony CA, no allowlist) -------------- */
+
+static int
+http_external(const char *url, const char *method,
+              const char *content_type, const char *body,
+              patchdl_buf_t *out) {
+#ifndef PATCHDL_HAVE_CURL
+    (void)url; (void)method; (void)content_type; (void)body; (void)out;
+    return -1;
+#else
+    CURL             *curl;
+    CURLcode          res;
+    char              host[256], ip[INET_ADDRSTRLEN];
+    char              resolve_str[512];
+    struct curl_slist *resolve_list = NULL;
+    struct curl_slist *headers      = NULL;
+
+    if (url_host(url, host, sizeof(host))) return -1;
+    if (dns_lookup(host, ip, sizeof(ip))) return -1;
+
+    snprintf(resolve_str, sizeof(resolve_str), "%s:443:%s", host, ip);
+    resolve_list = curl_slist_append(NULL, resolve_str);
+
+    {
+        size_t caller_max = out->max;
+        memset(out, 0, sizeof(*out));
+        out->max = caller_max;
+    }
+
+    curl = curl_easy_init();
+    if (!curl) { curl_slist_free_all(resolve_list); return -1; }
+
+    curl_easy_setopt(curl, CURLOPT_URL,             url);
+    curl_easy_setopt(curl, CURLOPT_RESOLVE,         resolve_list);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,   write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA,       out);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER,  0L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST,  0L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT,         10L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION,  1L);
+    curl_easy_setopt(curl, CURLOPT_MAXREDIRS,       3L);
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR,       "https");
+    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL,        1L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT,
+                     "Mozilla/5.0 (PlayStation; PatchDL)");
+
+    if (body) {
+        if (content_type) {
+            char ct[256];
+            snprintf(ct, sizeof(ct), "Content-Type: %s", content_type);
+            headers = curl_slist_append(headers, ct);
+        }
+        headers = curl_slist_append(headers, "Accept: application/json");
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
+    }
+
+    res = curl_easy_perform(curl);
+    curl_easy_cleanup(curl);
+    curl_slist_free_all(resolve_list);
+    curl_slist_free_all(headers);
+
+    if (res != CURLE_OK) {
+        free(out->data);
+        out->data = NULL;
+        out->size = 0;
+        return -1;
+    }
+    return 0;
+#endif
+}
+
+int
+patchdl_http_get_external(const char *url, patchdl_buf_t *out) {
+    return http_external(url, "GET", NULL, NULL, out);
+}
+
+int
+patchdl_http_post_external(const char *url, const char *content_type,
+                           const char *body, patchdl_buf_t *out) {
+    return http_external(url, "POST", content_type, body, out);
+}
+
 /* Write sink: tees the body to the file and, when verifying, into a running
    SHA-256. curl always calls with size==1, so nmemb is the byte count. */
 typedef struct {

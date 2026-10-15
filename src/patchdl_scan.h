@@ -48,6 +48,15 @@ typedef struct {
     char             patch_title_id[16]; /* target title id from version.xml */
     char             patch_storage_title_id[16]; /* title id embedded in delta_url */
     int              verxml_done;
+    /* Prospero Patches lookup (best compatible patch from version history) */
+    char             prospero_version[16];
+    char             prospero_required_fw[16];
+    char             prospero_size[16];
+    int              prospero_done;
+    /* Manifest URL derived from a link the user pasted from Prospero. When
+       set it replaces patch_url for download and install. */
+    char             manual_url[512];
+    char             manual_version[16];
     int              enabled;          /* user policy, persisted in config.json */
     int              resumable;        /* a partial download is on disk */
     long long        partial_bytes;    /* size of that partial, for the UI */

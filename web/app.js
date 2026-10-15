@@ -26,6 +26,8 @@ const fallback = {
     resolver: "Internal allowlist",
     free_space_mb: 771916,
     download_dir: "/data/patchdl (internal)",
+    lan_ip: "192.168.178.90",
+    http_port: 12880,
   },
   config: {
     default_policy: "deny",
@@ -76,6 +78,16 @@ const fallback = {
       patch_storage_match: true,
       mount_from: "/mnt/usb0/itemzflow/Shadowmounted Test Title", enabled: true, status: "available",
     },
+    {
+      title_id: "PPSA03396", name: "The Last of Us Part I",
+      content_id: "UP9000-PPSA03396_00-THELASTOFUSPART1",
+      installed_version: "01.000.000", compatible_version: null,
+      latest_version: "02.002.000", latest_required_fw: "10.20",
+      prospero_version: "01.003.000", prospero_required_fw: "7.01", prospero_size: "71.7 GB", prospero_done: true,
+      source_type: "official", source_path: "/system_ex/app/PPSA03396",
+      patch_storage_match: true,
+      mount_from: "/dev/ssd0.system_ex", enabled: true, status: "incompatible_fw",
+    },
   ],
   downloads: [],
   logs: [],
@@ -88,7 +100,7 @@ let state = {
   downloads: fallback.downloads,
   logs: fallback.logs,
   view: "games",
-  filter: "updatable",
+  filter: "updates",
   query: "",
   usingFallback: false,
 };
@@ -103,7 +115,8 @@ const els = {};
 document.addEventListener("DOMContentLoaded", () => {
   bindElements();
   bindEvents();
-  loadInitialData();
+  loadInitialData().then(openGuideFromHash);
+  window.addEventListener("hashchange", openGuideFromHash);
 });
 
 function bindElements() {
@@ -208,7 +221,8 @@ async function loadInitialData() {
   titles.forEach((g) => {
     const old = prev.get(g.title_id);
     // Neither state has a patch left to fetch, so drop stale job flags.
-    if (old && g.status !== "up_to_date" && g.status !== "incompatible_fw") {
+    if (old && g.status !== "up_to_date" &&
+        (g.status !== "incompatible_fw" || g.manual_version)) {
       if (old.downloaded) g.downloaded = true;
       if (old.installing) g.installing = true;
       if (old._autoInstalled) g._autoInstalled = true;
@@ -314,6 +328,12 @@ function renderSettings() {
 
 function renderGames() {
   renderGlobalStatus();
+  const counts = { updates: 0, uptodate: 0, blocked: 0, all: state.titles.length };
+  state.titles.forEach((g) => { counts[gameCategory(g)]++; });
+  document.querySelectorAll(".segmented button").forEach((b) => {
+    const c = b.querySelector(".chip-count");
+    if (c) c.textContent = String(counts[b.dataset.filter] ?? "");
+  });
   const visible = state.titles.filter(matchesFilter).filter(matchesQuery)
     .sort((a, b) => (a.name || a.title_id).localeCompare(b.name || b.title_id, undefined, { sensitivity: "base", numeric: true }));
   els.gameGrid.replaceChildren();
@@ -328,27 +348,25 @@ function renderGames() {
   visible.forEach((game) => els.gameGrid.appendChild(createGameCard(game)));
 }
 
-// Mutually-exclusive bucket per game for the filter chips.
+// One bucket per game for the filter chips, answering a single question: is
+// there something to get for this console? Where the patch comes from (Sony,
+// Prospero) and whether it installs or only downloads is shown on the card.
 function gameCategory(game) {
-  // Updating is the queue — jobs waiting for a pool slot. An actively
-  // downloading game stays under Updatable so you don't lose sight of it
-  // while drilling into the queue; same for paused (the user knows where
-  // it is and can resume from the card) and installing.
-  if (game._jobState === "queued") return "updating";
-  // checking is transient (version lookup still running); keep it visible under
-  // Updatable rather than letting it fall out of every specific filter.
-  if (game.status === "checking") return "updatable";
-  if (game.patch_title_match === false) return "blocked";
-  // Updatable means PatchDL can install it. Download-only titles (shadowmounts,
-  // shared-master patches) count as "can't update" unless a download of
-  // theirs is already running or paused.
-  if (game.status === "available" && isInstallAllowed(game)) return "updatable";
-  if (game.status === "available" && isDownloadAllowed(game) &&
-      (game.downloading || game.resumable)) return "updatable";
-  if (game.status === "available") return "blocked";
-  if (!sourcePolicy(game).allow_install && !sourcePolicy(game).allow_download) return "blocked";
-  if (game.status === "incompatible_fw") return "needsfw";
+  const policy = sourcePolicy(game);
+  if (game.patch_title_match === false || (!policy.allow_download && !policy.allow_install))
+    return "blocked";
+  if (game.downloading || game.resumable || game.downloaded || game.installing || game._jobState)
+    return "updates";
+  if (game.status === "checking" || game.status === "available" || hasOlderPatch(game))
+    return "updates";
   return "uptodate";
+}
+
+// Sony's newest patch needs newer firmware, but Prospero knows an older one
+// that runs here and is newer than what is installed.
+function hasOlderPatch(game) {
+  return game.status === "incompatible_fw" && Boolean(game.prospero_version) &&
+    game.prospero_version > (game.installed_version || "");
 }
 
 function matchesFilter(game) {
@@ -412,11 +430,7 @@ function createGameCard(game) {
       ${storagePill(game)}
       ${sourcePill(game)}
     </div>
-    <div class="versions">
-      <span>Installed <b>${escapeHtml(game.installed_version || "--")}</b></span>
-      <span>Compatible <b>${escapeHtml(game.compatible_version || "None")}</b></span>
-      <span>Latest <b>${escapeHtml(game.latest_version || "--")}</b>${game.latest_required_fw ? ` · needs FW ${escapeHtml(game.latest_required_fw)}` : ""}</span>
-    </div>
+    <div class="versions">${versionsHtml(game)}</div>
   `;
 
   const actions = document.createElement("div");
@@ -496,12 +510,15 @@ function primaryButton(game) {
   if (game.installing) return { label: "Installing…", variant: "ghost", disabled: true };
   if (game.downloading) return { label: "Pause", action: "pause", variant: "pause", hint: "Pause the download (keeps what was downloaded)." };
   if (game.patch_title_match === false) return null;
+  if (canGetOlderPatch(game))
+    return { label: "Old FW patch", action: "guide", variant: "update", hint: `Get ${game.prospero_version} from Prospero Patches, the newest patch that runs on this firmware.` };
   if (game.resumable && isDownloadAllowed(game))
     return { label: "Resume", action: "download", variant: "update", hint: "Continue the paused download where it stopped." };
-  if (game.downloaded && game.status === "available" && isInstallAllowed(game))
+  const hasPatch = game.status === "available" || Boolean(game.manual_version);
+  if (game.downloaded && hasPatch && isInstallAllowed(game))
     return { label: "Install", action: "install", variant: "update", hint: "Install the downloaded patch (modifies the game)." };
-  if (game.downloaded && game.status === "available") return null;
-  if (game.status !== "available") return null;
+  if (game.downloaded && hasPatch) return null;
+  if (!hasPatch) return null;
   if (!isDownloadAllowed(game)) return null;
   return state.config.install_after_download && isInstallAllowed(game)
     ? { label: "Update", action: "update", variant: "update", hint: "Download and install the update." }
@@ -517,15 +534,44 @@ function stopButton(game) {
   return null;
 }
 
+// Installed -> what PatchDL can get for this console -> newest overall (only
+// when that one is out of reach because of the firmware).
+function versionsHtml(game) {
+  const v = (x) => `<b>${escapeHtml(x)}</b>`;
+  const parts = [`<span>Installed ${v(game.installed_version || "--")}</span>`];
+  let offered = "";
+  if (game.manual_version) {
+    offered = game.manual_version;
+    parts.push(`<span>Update ${v(offered)} · from Prospero</span>`);
+  } else if (game.status === "available" && game.compatible_version) {
+    offered = game.compatible_version;
+    parts.push(`<span>Update ${v(offered)}</span>`);
+  } else if (hasOlderPatch(game)) {
+    offered = game.prospero_version;
+    const fw = game.prospero_required_fw ? ` · needs FW ${escapeHtml(game.prospero_required_fw)}` : "";
+    parts.push(`<span class="prospero-line">Update ${v(offered)}${fw} · <a href="https://prosperopatches.com/${encodeURIComponent(game.title_id)}" target="_blank" rel="noopener">Prospero</a></span>`);
+  } else if (game.status === "incompatible_fw" && !game.prospero_done) {
+    parts.push(`<span>Looking for a patch for this firmware\u2026</span>`);
+  }
+  if (game.latest_version && game.latest_version !== offered &&
+      game.latest_version > (game.installed_version || "")) {
+    const fw = game.latest_required_fw ? ` · needs FW ${escapeHtml(game.latest_required_fw)}` : "";
+    parts.push(`<span>Newest ${v(game.latest_version)}${fw}</span>`);
+  }
+  return parts.join("");
+}
+
 function statusPill(game) {
   if (game.installing) return `<span class="pill warn">Installing…</span>`;
   if (game.status === "checking") return `<span class="pill">Checking…</span>`;
   if (sourceType(game) === "fake") return `<span class="pill">Not supported</span>`;
   if (game.patch_title_match === false) return `<span class="pill blocked">Title mismatch</span>`;
+  if (game.manual_version || hasOlderPatch(game)) return `<span class="pill prospero">Via Prospero</span>`;
   if (game.status === "available" && !isInstallAllowed(game))
-    return `<span class="pill warn">Update · download only</span>`;
+    return `<span class="pill warn">Download only</span>`;
   if (game.status === "available") return `<span class="pill ok">Update available</span>`;
-  if (game.status === "incompatible_fw") return `<span class="pill warn">Needs FW ${escapeHtml(game.latest_required_fw || "")}</span>`;
+  if (game.status === "incompatible_fw")
+    return `<span class="pill">Newest needs FW ${escapeHtml(game.latest_required_fw || "?")}</span>`;
   if (game.status === "up_to_date") return `<span class="pill">Up to date</span>`;
   return `<span class="pill">No patch info</span>`;
 }
@@ -865,7 +911,7 @@ async function saveConfig() {
 // is on, the per-job auto-install pipeline kicks in once each download
 // finishes — no further client action needed.
 async function updateAll() {
-  const targets = state.games.filter((g) =>
+  const targets = state.titles.filter((g) =>
     g.status === "available" && isInstallAllowed(g) &&
     !g.downloading && !g.downloaded);
   if (!targets.length) {
@@ -955,6 +1001,7 @@ async function cancelDownload(titleId) {
     game.downloaded = false;
     game.resumable = false;
     game.partial_bytes = 0;
+    game.manual_version = null;   // the server drops the pasted link on cancel
   }
   state.downloads = state.downloads.filter((i) => i.title_id !== titleId);
   state.logs.push(`[${timeNow()}] Download cancelled / deleted: ${titleId}`);
@@ -971,6 +1018,7 @@ async function runTitleAction(titleId, action) {
   else if (action === "install") await doInstall(game);
   else if (action === "pause") await doPause(game);
   else if (action === "cancel") await cancelDownload(titleId);
+  else if (action === "guide") openGuide(game);
 }
 
 // Pause only sends the signal; the in-flight doDownload() request returns its
@@ -1008,7 +1056,7 @@ function hasSharedStorage(game) {
 function isDownloadAllowed(game) {
   return Boolean(
     game.enabled !== false &&
-    game.compatible_version &&
+    (game.compatible_version || game.manual_version) &&
     game.patch_title_match !== false &&
     sourcePolicy(game).allow_download
   );
@@ -1016,7 +1064,7 @@ function isDownloadAllowed(game) {
 function isInstallAllowed(game) {
   return Boolean(
     game.enabled !== false &&
-    game.compatible_version &&
+    (game.compatible_version || game.manual_version) &&
     game.patch_title_match !== false &&
     !hasSharedStorage(game) &&
     sourcePolicy(game).allow_install
@@ -1058,10 +1106,481 @@ const REASON_TEXT = {
   title_disabled: "This title is disabled.",
   download_paused: "Download paused.",
   not_downloading: "Nothing is downloading for this title.",
+  not_an_sc_link: "That is not the SC link. Under Additional Files, copy the link of the SC button.",
+  url_title_mismatch: "That link belongs to a different game.",
+  url_not_allowed: "Only Sony CDN links (https) are accepted.",
+  url_invalid: "The link contains unexpected characters.",
+  manifest_unavailable: "The PS5 could not load the package list from Sony. Copy the SC link again and retry.",
+  download_exists: "A download already exists for this game. Cancel it first.",
+  source_not_supported: "Downloads are not supported for this source.",
 };
 function reasonText(error) {
   const r = error && error.body && error.body.reason;
   return (r && REASON_TEXT[r]) || (error && error.message) || "failed";
+}
+
+/* ---------------- QR code (byte mode, ECC level M, versions 1-6) ----------------
+   Enough for ~100 bytes, i.e. any PatchDL link. Follows ISO/IEC 18004; the
+   structure mirrors Project Nayuki's reference encoder. */
+
+const QR_ECC_M = [0, 10, 16, 26, 18, 24, 16];      // ECC codewords per block
+const QR_BLOCKS_M = [0, 1, 1, 1, 2, 2, 4];         // number of blocks
+
+function qrRawModules(ver) {
+  let n = (16 * ver + 128) * ver + 64;
+  if (ver >= 2) {
+    const align = Math.floor(ver / 7) + 2;
+    n -= (25 * align - 10) * align - 55;
+  }
+  return n;
+}
+
+function qrDataCodewords(ver) {
+  return Math.floor(qrRawModules(ver) / 8) - QR_ECC_M[ver] * QR_BLOCKS_M[ver];
+}
+
+function qrGfMul(x, y) {
+  let z = 0;
+  for (let i = 7; i >= 0; i--) {
+    z = (z << 1) ^ ((z >>> 7) * 0x11d);
+    z ^= ((y >>> i) & 1) * x;
+  }
+  return z;
+}
+
+function qrRsDivisor(degree) {
+  const r = new Array(degree - 1).fill(0);
+  r.push(1);
+  let root = 1;
+  for (let i = 0; i < degree; i++) {
+    for (let j = 0; j < r.length; j++) {
+      r[j] = qrGfMul(r[j], root);
+      if (j + 1 < r.length) r[j] ^= r[j + 1];
+    }
+    root = qrGfMul(root, 0x02);
+  }
+  return r;
+}
+
+function qrRsRemainder(data, divisor) {
+  const r = divisor.map(() => 0);
+  for (const b of data) {
+    const factor = b ^ r.shift();
+    r.push(0);
+    divisor.forEach((coef, i) => { r[i] ^= qrGfMul(coef, factor); });
+  }
+  return r;
+}
+
+// Returns a square boolean matrix (true = dark), or null if text is too long.
+function qrEncode(text) {
+  const bytes = Array.from(new TextEncoder().encode(text));
+  let ver = 1;
+  while (ver <= 6 && 4 + 8 + bytes.length * 8 > qrDataCodewords(ver) * 8) ver++;
+  if (ver > 6) return null;
+
+  // Data bit stream: byte mode, 8-bit length, payload, terminator, padding.
+  const bits = [];
+  const push = (val, len) => { for (let i = len - 1; i >= 0; i--) bits.push((val >>> i) & 1); };
+  push(0x4, 4);
+  push(bytes.length, 8);
+  bytes.forEach((b) => push(b, 8));
+  const cap = qrDataCodewords(ver) * 8;
+  push(0, Math.min(4, cap - bits.length));
+  push(0, (8 - (bits.length % 8)) % 8);
+  for (let pad = 0xec; bits.length < cap; pad ^= 0xec ^ 0x11) push(pad, 8);
+  const data = [];
+  for (let i = 0; i < bits.length; i += 8) data.push(parseInt(bits.slice(i, i + 8).join(""), 2));
+
+  // Split into blocks, add Reed-Solomon ECC, interleave.
+  const numBlocks = QR_BLOCKS_M[ver];
+  const eccLen = QR_ECC_M[ver];
+  const rawCodewords = Math.floor(qrRawModules(ver) / 8);
+  const numShort = numBlocks - (rawCodewords % numBlocks);
+  const shortLen = Math.floor(rawCodewords / numBlocks);
+  const divisor = qrRsDivisor(eccLen);
+  const blocks = [];
+  for (let i = 0, k = 0; i < numBlocks; i++) {
+    const dat = data.slice(k, k + shortLen - eccLen + (i < numShort ? 0 : 1));
+    k += dat.length;
+    const ecc = qrRsRemainder(dat, divisor);
+    if (i < numShort) dat.push(0);
+    blocks.push(dat.concat(ecc));
+  }
+  const codewords = [];
+  for (let i = 0; i < blocks[0].length; i++)
+    blocks.forEach((blk, j) => {
+      if (i !== shortLen - eccLen || j >= numShort) codewords.push(blk[i]);
+    });
+
+  // Function patterns.
+  const size = ver * 4 + 17;
+  const mod = Array.from({ length: size }, () => new Array(size).fill(false));
+  const fn = Array.from({ length: size }, () => new Array(size).fill(false));
+  const set = (x, y, dark) => { mod[y][x] = dark; fn[y][x] = true; };
+  for (let i = 0; i < size; i++) { set(6, i, i % 2 === 0); set(i, 6, i % 2 === 0); }
+  [[3, 3], [size - 4, 3], [3, size - 4]].forEach(([cx, cy]) => {
+    for (let dy = -4; dy <= 4; dy++)
+      for (let dx = -4; dx <= 4; dx++) {
+        const x = cx + dx, y = cy + dy;
+        if (x < 0 || x >= size || y < 0 || y >= size) continue;
+        const d = Math.max(Math.abs(dx), Math.abs(dy));
+        set(x, y, d !== 2 && d !== 4);
+      }
+  });
+  if (ver >= 2) {
+    const pos = [6, size - 7];   // versions 2-6 have one alignment pattern
+    const c = pos[1];
+    for (let dy = -2; dy <= 2; dy++)
+      for (let dx = -2; dx <= 2; dx++)
+        set(c + dx, c + dy, Math.max(Math.abs(dx), Math.abs(dy)) !== 1);
+  }
+  const drawFormat = (mask) => {
+    const data5 = (0 << 3) | mask;          // ECC level M = 0b00
+    let rem = data5;
+    for (let i = 0; i < 10; i++) rem = (rem << 1) ^ ((rem >>> 9) * 0x537);
+    const f = ((data5 << 10) | rem) ^ 0x5412;
+    const bit = (i) => ((f >>> i) & 1) === 1;
+    for (let i = 0; i <= 5; i++) set(8, i, bit(i));
+    set(8, 7, bit(6));
+    set(8, 8, bit(7));
+    set(7, 8, bit(8));
+    for (let i = 9; i < 15; i++) set(14 - i, 8, bit(i));
+    for (let i = 0; i < 8; i++) set(size - 1 - i, 8, bit(i));
+    for (let i = 8; i < 15; i++) set(8, size - 15 + i, bit(i));
+    set(8, size - 8, true);
+  };
+  drawFormat(0);   // reserve the format areas before placing data
+
+  // Data placement: two-column zigzag from the bottom right.
+  let i = 0;
+  for (let right = size - 1; right >= 1; right -= 2) {
+    if (right === 6) right = 5;
+    for (let vert = 0; vert < size; vert++)
+      for (let j = 0; j < 2; j++) {
+        const x = right - j;
+        const upward = ((right + 1) & 2) === 0;
+        const y = upward ? size - 1 - vert : vert;
+        if (!fn[y][x] && i < codewords.length * 8) {
+          mod[y][x] = ((codewords[i >>> 3] >>> (7 - (i & 7))) & 1) === 1;
+          i++;
+        }
+      }
+  }
+
+  const maskFn = [
+    (x, y) => (x + y) % 2 === 0,
+    (x, y) => y % 2 === 0,
+    (x) => x % 3 === 0,
+    (x, y) => (x + y) % 3 === 0,
+    (x, y) => (Math.floor(x / 3) + Math.floor(y / 2)) % 2 === 0,
+    (x, y) => ((x * y) % 2) + ((x * y) % 3) === 0,
+    (x, y) => (((x * y) % 2) + ((x * y) % 3)) % 2 === 0,
+    (x, y) => (((x + y) % 2) + ((x * y) % 3)) % 2 === 0,
+  ];
+  const applyMask = (m) => {
+    for (let y = 0; y < size; y++)
+      for (let x = 0; x < size; x++)
+        if (!fn[y][x] && maskFn[m](x, y)) mod[y][x] = !mod[y][x];
+  };
+  // Simplified penalty (runs, 2x2 blocks, balance) to pick a readable mask.
+  const penalty = () => {
+    let p = 0, dark = 0;
+    for (let a = 0; a < size; a++) {
+      let runR = 1, runC = 1;
+      for (let b = 0; b < size; b++) {
+        if (mod[a][b]) dark++;
+        if (b > 0) {
+          runR = mod[a][b] === mod[a][b - 1] ? runR + 1 : 1;
+          runC = mod[b][a] === mod[b - 1][a] ? runC + 1 : 1;
+          if (runR === 5) p += 3; else if (runR > 5) p++;
+          if (runC === 5) p += 3; else if (runC > 5) p++;
+        }
+        if (a > 0 && b > 0) {
+          const c = mod[a][b];
+          if (c === mod[a - 1][b] && c === mod[a][b - 1] && c === mod[a - 1][b - 1]) p += 3;
+        }
+      }
+    }
+    const total = size * size;
+    p += Math.floor(Math.abs(dark * 20 - total * 10) / total) * 10;
+    return p;
+  };
+  let best = 0, bestScore = Infinity;
+  for (let m = 0; m < 8; m++) {
+    applyMask(m);
+    drawFormat(m);
+    const score = penalty();
+    if (score < bestScore) { best = m; bestScore = score; }
+    applyMask(m);   // XOR again to undo
+  }
+  applyMask(best);
+  drawFormat(best);
+  return mod;
+}
+
+// SVG markup for a QR matrix, dark on white with the required 4-module margin.
+function qrSvg(matrix) {
+  const n = matrix.length, q = 4, s = n + q * 2;
+  let d = "";
+  matrix.forEach((row, y) => row.forEach((dark, x) => {
+    if (dark) d += `M${x + q},${y + q}h1v1h-1z`;
+  }));
+  return `<svg xmlns="http://www.w3.org/2000/svg" class="qr" viewBox="0 0 ${s} ${s}" shape-rendering="crispEdges" role="img" aria-label="QR code"><rect width="${s}" height="${s}" fill="#fff" stroke="none"/><path d="${d}" fill="#000" stroke="none"/></svg>`;
+}
+
+/* ---------------- older patch guide (Prospero) ---------------- */
+
+// Sony's version.xml only lists the newest patch. When that needs newer
+// firmware, Prospero Patches still has older ones, but its links sit behind a
+// human check, so the user copies one link and PatchDL does the rest. Copying
+// is awkward in the PS5 browser, hence the QR hand-off to a phone.
+
+const guide = { el: null, game: null, fromLink: false, started: false, busy: false,
+                lastUrl: "", timer: null, returnFocus: null, onKey: null };
+
+function canGetOlderPatch(game) {
+  return hasOlderPatch(game) &&
+    !game.manual_version && !game.downloading && !game.downloaded &&
+    !game.resumable && !game.installing &&
+    isDownloadAllowed({ ...game, manual_version: game.prospero_version });
+}
+
+// A link a phone can open. A page opened on the PS5 itself runs on 127.0.0.1,
+// so the server reports its LAN address for this.
+function phoneLink(game) {
+  const h = location.hostname;
+  let base = location.origin;
+  if (!h || h === "localhost" || h === "127.0.0.1" || h === "[::1]") {
+    if (!state.status.lan_ip) return null;
+    base = `http://${state.status.lan_ip}:${state.status.http_port || location.port || 12880}`;
+  }
+  return `${base}/#get/${encodeURIComponent(game.title_id)}`;
+}
+
+function openGuideFromHash() {
+  const m = location.hash.match(/^#get\/([A-Za-z0-9_.-]+)$/);
+  if (!m) return;
+  const game = state.titles.find((g) => g.title_id === m[1]);
+  if (!game) { showToast("That game is not installed on this PS5."); clearGuideHash(); return; }
+  if (!canGetOlderPatch(game)) {
+    showToast(game.manual_version || game.downloading || game.downloaded
+      ? `${game.name}: the older patch is already on its way.`
+      : `${game.name}: there is no older patch to fetch.`);
+    clearGuideHash();
+    return;
+  }
+  openGuide(game, true);
+}
+
+function clearGuideHash() {
+  if (location.hash.startsWith("#get/"))
+    history.replaceState(null, "", location.pathname + location.search);
+}
+
+function openGuide(game, fromLink = false) {
+  closeGuide();
+  Object.assign(guide, { game, fromLink, started: false, busy: false, lastUrl: "",
+                         returnFocus: document.activeElement });
+  const ver = escapeHtml(game.prospero_version);
+  const size = game.prospero_size ? ` (${escapeHtml(game.prospero_size)})` : "";
+  const link = fromLink ? null : phoneLink(game);
+  const matrix = link ? qrEncode(link) : null;
+  const handoff = matrix
+    ? `<div class="guide-qr">${qrSvg(matrix)}<div>
+         <strong>Easier on your phone</strong>
+         <span>Scan this with your phone camera and continue there. Copying a link works much better on a phone. This screen follows along.</span>
+         <code>${escapeHtml(link)}</code>
+       </div></div>`
+    : "";
+
+  const wrap = document.createElement("div");
+  wrap.className = "guide-backdrop";
+  wrap.innerHTML = `
+    <section class="guide" role="dialog" aria-modal="true" aria-labelledby="guideTitle">
+      <header class="guide-head">
+        <div>
+          <p class="eyebrow">Old FW patch</p>
+          <h2 id="guideTitle">Get ${ver}</h2>
+          <p class="guide-game">${escapeHtml(game.name)}</p>
+        </div>
+        <button class="icon-button guide-close" type="button" aria-label="Close">×</button>
+      </header>
+      <p class="guide-why">Sony only offers ${escapeHtml(game.latest_version || "the newest patch")}, which needs FW ${escapeHtml(game.latest_required_fw || "?")}. Prospero Patches still lists <b>${ver}</b>, which runs on FW ${escapeHtml(game.prospero_required_fw || "?")}.</p>
+      ${handoff}
+      <ol class="guide-steps">
+        <li>
+          <div class="guide-step-text"><strong>Open Prospero Patches</strong>
+            <span>Tap version <b>${ver}</b>${size} and complete the “I am human” check.</span></div>
+          <a class="row-button is-update guide-open" href="https://prosperopatches.com/${encodeURIComponent(game.title_id)}" target="_blank" rel="noopener">Open Prospero</a>
+        </li>
+        <li>
+          <div class="guide-step-text"><strong>Copy the SC link</strong>
+            <span>Under <b>Additional Files</b>, press and hold the <b>SC</b> button and choose <i>Copy Link</i>. PatchDL takes the full piece list from it.</span></div>
+        </li>
+        <li>
+          <div class="guide-step-text"><strong>Paste it here</strong>
+            <span>The download starts on your PS5 as soon as the link is in.</span></div>
+          <div class="guide-paste">
+            <input class="guide-input" type="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://…_sc.pkg" aria-label="SC link">
+            <button class="row-button guide-start" type="button">Start</button>
+          </div>
+          <div class="guide-status" role="status" aria-live="polite"></div>
+        </li>
+      </ol>
+    </section>`;
+  document.body.appendChild(wrap);
+  guide.el = wrap;
+
+  const input = wrap.querySelector(".guide-input");
+  const tryInput = () => {
+    const url = extractLink(input.value);
+    if (url && url !== guide.lastUrl && /\.(pkg|crc|json)$/i.test(url)) guideSubmit(url, false);
+  };
+  input.addEventListener("focus", () => input.select());   // a paste then replaces the old link
+  input.addEventListener("input", tryInput);
+  input.addEventListener("paste", () => setTimeout(tryInput, 0));
+  wrap.querySelector(".guide-start").addEventListener("click",
+    () => guideSubmit(extractLink(input.value), false));
+  wrap.querySelector(".guide-close").addEventListener("click", closeGuide);
+  wrap.addEventListener("click", (e) => { if (e.target === wrap) closeGuide(); });
+  guide.onKey = (e) => { if (e.key === "Escape") closeGuide(); };
+  document.addEventListener("keydown", guide.onKey);
+
+  guideStatus("idle", matrix ? "Waiting for the link…" : "");
+  guide.timer = setInterval(guidePoll, 2000);
+  (fromLink ? wrap.querySelector(".guide-open") : wrap.querySelector(".guide-close")).focus();
+}
+
+function closeGuide() {
+  if (!guide.el) return;
+  clearInterval(guide.timer);
+  document.removeEventListener("keydown", guide.onKey);
+  guide.el.remove();
+  guide.el = null;
+  guide.game = null;
+  clearGuideHash();
+  if (guide.returnFocus && document.contains(guide.returnFocus)) guide.returnFocus.focus();
+}
+
+// The last link in the field wins, so pasting a new link next to a rejected
+// one (instead of over it) still picks up the new one.
+function extractLink(text) {
+  const all = String(text || "").match(/https?:\/\/(?:(?!https?:\/\/)[^\s"'<>])+/g) || [];
+  const pkgs = all.filter((u) => /\.(pkg|crc|json)$/i.test(u));
+  return (pkgs.length ? pkgs[pkgs.length - 1] : all[all.length - 1]) || "";
+}
+
+function guideStatus(kind, message, action) {
+  if (!guide.el) return;
+  const box = guide.el.querySelector(".guide-status");
+  box.innerHTML = message ? `<p class="guide-msg is-${kind}">${message}</p>` : "";
+  if (action) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "row-button is-ghost guide-action";
+    b.textContent = action.label;
+    b.addEventListener("click", action.run);
+    box.appendChild(b);
+  }
+}
+
+async function guideSubmit(url, force) {
+  const game = guide.game;
+  if (!game || guide.busy) return;
+  if (!url) { guideStatus("error", "Paste the SC link from Prospero first."); return; }
+  guide.busy = true;
+  guide.lastUrl = url;
+  const start = guide.el.querySelector(".guide-start");
+  start.disabled = true;
+  guideStatus("busy", "Checking the link on your PS5…");
+  try {
+    await postJson("/api/download_url", {
+      title_id: game.title_id, url, version: game.prospero_version, force,
+    });
+  } catch (error) {
+    guide.busy = false;
+    if (!guide.el) return;
+    start.disabled = false;
+    const b = (error && error.body) || {};
+    if (b.reason === "size_mismatch") {
+      guideStatus("warn",
+        `This link is ${formatBytes(b.found_bytes)} in ${Number(b.pieces) || "?"} pieces, but ${escapeHtml(game.prospero_version)} should be about ${escapeHtml(b.expected || "?")}. It is probably a different version.`,
+        { label: "Download anyway", run: () => guideSubmit(url, true) });
+    } else {
+      guideStatus("error", escapeHtml(reasonText(error)) + (b.detail ? ` (${escapeHtml(b.detail)})` : ""));
+    }
+    state.logs.push(`[${timeNow()}] Prospero link for ${game.title_id} refused: ${reasonText(error)}`);
+    renderLogs();
+    return;
+  }
+  guide.busy = false;
+  manualDownloadStarted(game);
+  if (!guide.fromLink) {
+    showToast(`${game.name}: download of ${game.prospero_version} started.`);
+    closeGuide();
+    return;
+  }
+  guide.started = true;
+  guideStatus("ok", "Download started on your PS5.");
+}
+
+// Card state for a download that the server has accepted (from this page or
+// from a phone); the pool's job list takes over from here.
+function manualDownloadStarted(game) {
+  game.manual_version = game.prospero_version;
+  game.downloading = true;
+  game._localDownloading = true;
+  game._localSince = Date.now();
+  game._autoInstalled = false;
+  state.downloads = state.downloads.filter((i) => i.title_id !== game.title_id);
+  state.downloads.push({ title_id: game.title_id, name: game.name, version: game.manual_version,
+                         state: "queued", progress: 0, bytes: 0, total_bytes: 0 });
+  state.logs.push(`[${timeNow()}] Download queued (Prospero): ${game.title_id} ${game.manual_version}`);
+  renderGames(); renderLogs();
+  startDownloadPolling();
+}
+
+async function guidePoll() {
+  const game = guide.game;
+  if (!game) return;
+  let jobs;
+  try {
+    const r = await fetch(API.downloads, { cache: "no-store" });
+    if (!r.ok) return;
+    jobs = await r.json();
+  } catch (error) {
+    return;
+  }
+  if (guide.game !== game) return;
+  const j = (jobs || []).find((x) => x.title_id === game.title_id);
+  if (!j) return;
+  if (!guide.started) {
+    // Only a job that is actually running means a link arrived from elsewhere;
+    // an old failed or paused entry does not.
+    if (j.state !== "queued" && j.state !== "active") return;
+    manualDownloadStarted(game);
+    if (!guide.fromLink) {
+      showToast(`${game.name}: link received, download of ${game.prospero_version} started.`);
+      closeGuide();
+      return;
+    }
+    guide.started = true;
+  }
+  const total = Number(j.total_bytes) || 0;
+  const pct = total ? Math.min(100, Math.round((Number(j.bytes) || 0) * 100 / total)) : 0;
+  const note = {
+    queued: "Queued on your PS5…",
+    active: "Downloading on your PS5. You can close this page.",
+    paused: "Paused on your PS5.",
+    done: state.config.install_after_download
+      ? "Downloaded. Your PS5 installs it now."
+      : "Downloaded. Press Install on the game in PatchDL.",
+    error: "The download stopped. Resume it from the game in PatchDL.",
+  }[j.state] || "";
+  guideStatus(j.state === "error" ? "error" : "ok",
+    `${note}<span class="guide-progress"><span class="progress"><i style="width:${pct}%"></i></span>` +
+    `<span>${total ? `${formatBytes(j.bytes)} / ${formatBytes(total)} · ` : ""}${pct}%</span></span>`);
 }
 
 /* ---------------- formatting ---------------- */

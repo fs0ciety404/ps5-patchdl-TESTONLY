@@ -16,16 +16,21 @@
 #include "patchdl_resolve.h"
 #include "patchdl_tile.h"
 #include "patchdl_verxml.h"
+#include "patchdl_prospero.h"
 #include "patchdl_version.h"
 
+#include <arpa/inet.h>
 #include <microhttpd.h>
+#include <netinet/in.h>
 #include <pthread.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
@@ -431,13 +436,11 @@ static const char *INSTALL_URI_HOSTS[] = {
    INSTALL_URI_HOSTS (or a subdomain). Rejects file://, http://, redirects
    to other hosts (libcurl enforces via host_allowed at fetch time). */
 static int
-install_uri_safe(const char *uri) {
-    const char *host_start, *end;
+cdn_host_ok(const char *host_start) {
+    const char *end;
     size_t      hlen;
     char        host[128];
 
-    if (!uri || strncmp(uri, "https://", 8) != 0) return 0;
-    host_start = uri + 8;
     end        = strpbrk(host_start, "/:?");
     hlen       = end ? (size_t)(end - host_start) : strlen(host_start);
     if (hlen == 0 || hlen >= sizeof(host)) return 0;
@@ -452,6 +455,11 @@ install_uri_safe(const char *uri) {
             !strcasecmp(host + hlen - alen, INSTALL_URI_HOSTS[i])) return 1;
     }
     return 0;
+}
+
+static int
+install_uri_safe(const char *uri) {
+    return uri && !strncmp(uri, "https://", 8) && cdn_host_ok(uri + 8);
 }
 
 typedef struct {
@@ -634,10 +642,34 @@ data_free_mb(void) {
 
 /* Built fresh per request so free space stays live (a 60+ GB download moves
    it a lot). g_fw is read-only after startup, so this is thread-safe. */
+/* The console's LAN address, so a page opened on the PS5 itself (127.0.0.1)
+   can hand a phone a reachable link. Connecting a UDP socket sends nothing;
+   it only makes the kernel pick the outgoing interface. */
+static void
+lan_ipv4(char *out, size_t sz) {
+    struct sockaddr_in a;
+    socklen_t          len = sizeof a;
+    int                s = socket(AF_INET, SOCK_DGRAM, 0);
+
+    out[0] = '\0';
+    if (s < 0) return;
+    memset(&a, 0, sizeof a);
+    a.sin_family      = AF_INET;
+    a.sin_port        = htons(53);
+    a.sin_addr.s_addr = htonl(0x01010101);
+    if (connect(s, (struct sockaddr *)&a, sizeof a) == 0 &&
+        getsockname(s, (struct sockaddr *)&a, &len) == 0 &&
+        !inet_ntop(AF_INET, &a.sin_addr, out, (socklen_t)sz))
+        out[0] = '\0';
+    close(s);
+}
+
 static char *
 build_status_json(void) {
+    char  ip[INET_ADDRSTRLEN];
     char *out = malloc(512);
     if (!out) return NULL;
+    lan_ipv4(ip, sizeof ip);
     snprintf(out, 512,
              "{\"firmware\":\"%s\","
              "\"firmware_build\":\"0x%08x\","
@@ -645,8 +677,11 @@ build_status_json(void) {
              "\"resolver\":\"Internal allowlist\","
              "\"free_space_mb\":%lld,"
              "\"download_dir\":\"/data/patchdl (internal)\","
+             "\"lan_ip\":\"%s\","
+             "\"http_port\":%d,"
              "\"version\":\"%s\"}",
-             g_fw.str, g_fw.bin, data_free_mb(), PATCHDL_VERSION);
+             g_fw.str, g_fw.bin, data_free_mb(), ip, PATCHDL_HTTP_PORT,
+             PATCHDL_VERSION);
     return out;
 }
 
@@ -842,6 +877,16 @@ build_titles_json(void) {
         jbuf_appendf(&j, ",\"patch_title_match\":%s",
                      (!t->patch_title_id[0] ||
                       !strncmp(t->patch_title_id, t->title_id, 9)) ? "true" : "false");
+        jbuf_append(&j, ",\"prospero_version\":");
+            jbuf_append_ver_or_null(&j, t->prospero_version);
+        jbuf_append(&j, ",\"prospero_required_fw\":");
+            jbuf_append_ver_or_null(&j, t->prospero_required_fw);
+        jbuf_append(&j, ",\"prospero_size\":");
+            jbuf_append_ver_or_null(&j, t->prospero_size);
+        jbuf_appendf(&j, ",\"prospero_done\":%s",
+                     t->prospero_done ? "true" : "false");
+        jbuf_append(&j, ",\"manual_version\":");
+            jbuf_append_ver_or_null(&j, t->manual_url[0] ? t->manual_version : "");
         jbuf_appendf(&j, ",\"enabled\":%s", t->enabled ? "true" : "false");
         jbuf_appendf(&j, ",\"resumable\":%s", t->resumable ? "true" : "false");
         jbuf_appendf(&j, ",\"partial_bytes\":%lld", t->partial_bytes);
@@ -987,6 +1032,29 @@ verxml_fetch_thread(void *arg) {
 
         if (up_to_date && info.compatible_url[0])
             cleanup_installed_download(t->title_id, info.compatible_url);
+
+        /* When the latest patch needs newer firmware and no compatible
+           version came from Sony, ask Prospero Patches for the full
+           version history. */
+        if (g_verxml_stop) break;
+        if (!strcmp(title_status_str(t), "incompatible_fw") &&
+            t->source_type != PATCHDL_SOURCE_FAKE &&
+            t->source_type != PATCHDL_SOURCE_UNKNOWN) {
+            patchdl_prospero_result_t pp;
+            if (!patchdl_prospero_query(t->title_id, g_fw.bin, &pp) &&
+                pp.found && strcmp(pp.version, t->installed_version) > 0) {
+                pthread_mutex_lock(&g_mutex);
+                strncpy(t->prospero_version, pp.version,
+                        sizeof(t->prospero_version) - 1);
+                strncpy(t->prospero_required_fw, pp.required_fw,
+                        sizeof(t->prospero_required_fw) - 1);
+                strncpy(t->prospero_size, pp.size, sizeof(t->prospero_size) - 1);
+                pthread_mutex_unlock(&g_mutex);
+            }
+            pthread_mutex_lock(&g_mutex);
+            t->prospero_done = 1;
+            pthread_mutex_unlock(&g_mutex);
+        }
     }
     return NULL;
 }
@@ -1024,6 +1092,15 @@ get_title_action_info(const char *title_id, patchdl_source_t *src,
             name[name_sz - 1] = '\0';
             strncpy(version, g_titles[i].compatible_version, ver_sz - 1);
             version[ver_sz - 1] = '\0';
+            if (g_titles[i].manual_url[0]) {
+                /* A pasted Prospero link wins: it is the title's own package
+                   (checked on submit), so no delta and no shared master. */
+                snprintf(patch_url, url_sz, "%s", g_titles[i].manual_url);
+                delta_url[0] = '\0';
+                snprintf(patch_title_id, pt_sz, "%.9s", title_id);
+                snprintf(patch_storage_title_id, pst_sz, "%.9s", title_id);
+                snprintf(version, ver_sz, "%s", g_titles[i].manual_version);
+            }
             *enabled = g_titles[i].enabled;
             found = 1;
             break;
@@ -1089,6 +1166,7 @@ url_is_manifest(const char *url) {
     return n > 5 && !strcmp(url + n - 5, ".json");
 }
 
+
 /* ---------- resume sidecar + pool helpers ------------------------------- */
 
 static void
@@ -1122,6 +1200,79 @@ remove_title_dir(const char *title_id) {
         closedir(d);
     }
     rmdir(dir);
+}
+
+/* ---------- user-supplied patch link (Prospero) ------------------------ */
+
+static void
+manual_source_path(const char *title_id, char *out, size_t sz) {
+    snprintf(out, sz, "%s/%s/manual.json", PATCHDL_DL_DIR, title_id);
+}
+
+/* Persist the pasted link next to the download so install and resume still
+   find it after a restart. Cancel deletes the directory, and with it this. */
+static void
+save_manual_source(const char *title_id, const char *url, const char *version) {
+    char  dir[288], path[320];
+    FILE *f;
+    snprintf(dir, sizeof dir, "%s/%s", PATCHDL_DL_DIR, title_id);
+    mkdir(PATCHDL_DL_DIR, 0777);
+    mkdir(dir, 0777);
+    manual_source_path(title_id, path, sizeof path);
+    if ((f = fopen(path, "w"))) {
+        fprintf(f, "{\"url\":\"%s\",\"version\":\"%s\"}\n", url, version);
+        fclose(f);
+    }
+}
+
+static void
+set_manual_source(const char *title_id, const char *url, const char *version) {
+    pthread_mutex_lock(&g_mutex);
+    for (size_t i = 0; i < g_title_count; i++)
+        if (!strcmp(g_titles[i].title_id, title_id)) {
+            snprintf(g_titles[i].manual_url, sizeof g_titles[i].manual_url, "%s", url);
+            snprintf(g_titles[i].manual_version, sizeof g_titles[i].manual_version,
+                     "%s", version);
+            break;
+        }
+    pthread_mutex_unlock(&g_mutex);
+}
+
+static void
+clear_manual_source(const char *title_id) {
+    char path[320], dir[288];
+    set_manual_source(title_id, "", "");
+    manual_source_path(title_id, path, sizeof path);
+    unlink(path);
+    snprintf(dir, sizeof dir, "%s/%s", PATCHDL_DL_DIR, title_id);
+    rmdir(dir);   /* fails while the pkg is still there; the cancel path removes it */
+}
+
+/* Startup, single-threaded. A link whose version is already installed is
+   spent: drop it together with its package. */
+static void
+load_manual_sources(void) {
+    for (size_t i = 0; i < g_title_count; i++) {
+        patchdl_title_t *t = &g_titles[i];
+        char             path[320], buf[1024];
+        FILE            *f;
+        size_t           n;
+
+        if (!path_segment_safe(t->title_id)) continue;
+        manual_source_path(t->title_id, path, sizeof path);
+        if (!(f = fopen(path, "r"))) continue;
+        n = fread(buf, 1, sizeof buf - 1, f);
+        fclose(f);
+        buf[n] = '\0';
+        json_get_str(buf, "url", t->manual_url, sizeof t->manual_url);
+        json_get_str(buf, "version", t->manual_version, sizeof t->manual_version);
+        if (!url_is_manifest(t->manual_url) || !t->manual_version[0] ||
+            (t->installed_version[0] &&
+             strcmp(t->installed_version, t->manual_version) >= 0)) {
+            t->manual_url[0] = t->manual_version[0] = '\0';
+            remove_title_dir(t->title_id);
+        }
+    }
 }
 
 /* Mirror the resumable flag into g_titles (read by /api/titles). Takes g_mutex,
@@ -1750,6 +1901,7 @@ do_cancel(struct MHD_Connection *conn, const char *title_id) {
         remove_title_dir(title_id);
         set_title_resumable(title_id, 0, 0);
     }
+    clear_manual_source(title_id);
     return queue_json(conn, MHD_HTTP_OK, "{\"ok\":true,\"cancelled\":true}");
 }
 
@@ -1821,6 +1973,170 @@ do_install(struct MHD_Connection *conn, const char *title_id,
              rc == 0 ? "true" : "false", rc, msg, dest);
     return queue_json_owned(conn, rc == 0 ? MHD_HTTP_OK : MHD_HTTP_BAD_GATEWAY,
                             strdup(resp));
+}
+
+/* Turn a link copied from Prospero's "Additional Files" into the URL of
+   Sony's package manifest. Sony keeps the manifest ("<name>.json") in the same
+   folder as the package's "<name>_sc.pkg" piece and "<name>.crc" file, and the
+   manifest lists every piece with its offset and SHA-256, so the download then
+   runs exactly like an official one. Piece links ("<name>_<n>.pkg") live in a
+   different folder and can't lead to the manifest. Returns NULL on success,
+   else a reason code for the UI. */
+static const char *
+manifest_from_link(const char *tid, const char *in, char *canon, size_t sz) {
+    static const char *const ends[] = { "_sc.pkg", ".crc", ".json", NULL };
+    char        tag[16];
+    const char *p, *rest, *base, *stem_end = NULL;
+    size_t      n = strlen(in);
+
+    /* The URL ends up unescaped in JSON sidecars and responses, and dot
+       segments could walk the path into another title's folder. */
+    for (p = in; *p; p++)
+        if (!isalnum((unsigned char)*p) && !strchr("-._~:/", *p))
+            return "url_invalid";
+    if (strstr(in, ".."))           return "url_invalid";
+    if (!strncmp(in, "https://", 8))     rest = in + 8;
+    else if (!strncmp(in, "http://", 7)) rest = in + 7;
+    else                            return "url_not_allowed";
+    if (!cdn_host_ok(rest))         return "url_not_allowed";
+
+    for (int i = 0; ends[i]; i++) {
+        size_t el = strlen(ends[i]);
+        if (n > el && !strcmp(in + n - el, ends[i])) { stem_end = in + n - el; break; }
+    }
+    if (!stem_end)                  return "not_an_sc_link";
+    base = strrchr(in, '/') + 1;    /* the scheme guarantees a '/' */
+    if (stem_end <= base)           return "not_an_sc_link";
+
+    /* Sony keeps a title's files under ".../<TID>_00/..." and names them
+       "<publisher>-<TID>_00-<label>..."; both must name this title. */
+    snprintf(tag, sizeof tag, "/%.9s_", tid);
+    if (!strstr(in, tag))           return "url_title_mismatch";
+    tag[0] = '-';
+    if (!strstr(base, tag))         return "url_title_mismatch";
+
+    /* Manifests are fetched over https with the pinned Sony root. */
+    if (sizeof("https://") - 1 + (size_t)(stem_end - rest) + sizeof(".json") > sz)
+        return "url_too_long";
+    snprintf(canon, sz, "https://%.*s.json", (int)(stem_end - rest), rest);
+    return NULL;
+}
+
+/* Prospero labels sizes in GiB ("71.7 GB"), about 0.1 above the piece sum.
+   Returns 1 when `found` bytes clearly don't match the size Prospero lists
+   for `ver`, i.e. the user most likely copied a link of another version.
+   Versions of (nearly) equal size can't be told apart this way. */
+static int
+size_mismatch(const char *tid, const char *ver, long long found,
+              char *label, size_t lsz) {
+    char   lbl[16] = {0}, pver[16] = {0}, unit[8] = {0};
+    double v, unit_bytes, expect, diff, tol;
+
+    pthread_mutex_lock(&g_mutex);
+    for (size_t i = 0; i < g_title_count; i++)
+        if (!strcmp(g_titles[i].title_id, tid)) {
+            memcpy(lbl, g_titles[i].prospero_size, sizeof lbl - 1);
+            memcpy(pver, g_titles[i].prospero_version, sizeof pver - 1);
+            break;
+        }
+    pthread_mutex_unlock(&g_mutex);
+    for (char *c = lbl; *c; c++)          /* external text, echoed into JSON */
+        if (!isalnum((unsigned char)*c) && *c != '.' && *c != ' ') *c = '?';
+    snprintf(label, lsz, "%s", lbl);
+
+    if (strcmp(pver, ver) || sscanf(lbl, "%lf %7s", &v, unit) != 2) return 0;
+    if (!strcmp(unit, "TB"))      unit_bytes = 1099511627776.0;
+    else if (!strcmp(unit, "GB")) unit_bytes = 1073741824.0;
+    else if (!strcmp(unit, "MB")) unit_bytes = 1048576.0;
+    else return 0;
+    expect = v * unit_bytes;
+    diff   = (double)found - expect;
+    if (diff < 0) diff = -diff;
+    tol = expect * 0.02;
+    if (tol < 0.15 * unit_bytes) tol = 0.15 * unit_bytes;
+    return diff > tol;
+}
+
+/* Queue a patch from an SC/CRC link copied off Prospero Patches. The link must
+   point at this title's own folder on Sony's CDN, so a pasted URL can't put
+   another game's package on this one. */
+static enum MHD_Result
+handle_download_url(struct MHD_Connection *conn, const char *body) {
+    char             tid[32], in[768], ver[16], canon[512], state[320], resp[192];
+    char             expect[16];
+    patchdl_manifest_t mf;
+    char             purl[512], durl[512], ptid[16], pstid[16];
+    char             cid[64], tname[128], tv[16];
+    const char      *p, *why;
+    struct stat      st;
+    int              en = 0, busy = 0, pieces;
+    long long        found;
+    patchdl_source_t src = PATCHDL_SOURCE_UNKNOWN;
+
+    json_get_str(body, "title_id", tid, sizeof tid);
+    json_get_str(body, "url", in, sizeof in);
+    json_get_str(body, "version", ver, sizeof ver);
+
+    if (!tid[0] || !in[0] || !ver[0])
+        return queue_json(conn, MHD_HTTP_BAD_REQUEST,
+            "{\"ok\":false,\"reason\":\"title_id, url and version required\"}");
+    if (!path_segment_safe(tid) || strlen(tid) < 9)
+        return queue_json(conn, MHD_HTTP_FORBIDDEN,
+            "{\"ok\":false,\"reason\":\"title_id_unsafe\"}");
+    for (p = ver; *p; p++)
+        if (!isdigit((unsigned char)*p) && *p != '.')
+            return queue_json(conn, MHD_HTTP_BAD_REQUEST,
+                "{\"ok\":false,\"reason\":\"version_invalid\"}");
+    if ((why = manifest_from_link(tid, in, canon, sizeof canon))) {
+        snprintf(resp, sizeof resp, "{\"ok\":false,\"reason\":\"%s\"}", why);
+        return queue_json_owned(conn, MHD_HTTP_BAD_REQUEST, strdup(resp));
+    }
+
+    if (!get_title_action_info(tid, &src, purl, sizeof purl, durl, sizeof durl,
+                               ptid, sizeof ptid, pstid, sizeof pstid,
+                               cid, sizeof cid, tname, sizeof tname,
+                               tv, sizeof tv, &en))
+        return queue_text(conn, MHD_HTTP_NOT_FOUND, "unknown title");
+    if (!en)
+        return queue_json(conn, MHD_HTTP_FORBIDDEN,
+            "{\"ok\":false,\"reason\":\"title_disabled\"}");
+    if (src == PATCHDL_SOURCE_UNKNOWN || src == PATCHDL_SOURCE_FAKE)
+        return queue_json(conn, MHD_HTTP_FORBIDDEN,
+            "{\"ok\":false,\"reason\":\"source_not_supported\"}");
+
+    /* Different versions share the same file name, so never mix a new link
+       into an existing download or partial: the user cancels it first. */
+    pthread_mutex_lock(&g_pool.mtx);
+    for (dl_job_t *j = g_pool.jobs; j; j = j->next)
+        if (!strcmp(j->title_id, tid)) busy = 1;
+    pthread_mutex_unlock(&g_pool.mtx);
+    title_state_path(tid, state, sizeof state);
+    if (busy || stat(state, &st) == 0)
+        return queue_json(conn, MHD_HTTP_CONFLICT,
+            "{\"ok\":false,\"reason\":\"download_exists\","
+            "\"hint\":\"cancel the current download first\"}");
+
+    /* Load the manifest here rather than only at admit: a dead or wrong link
+       then fails with a reason the user sees right away, and the total can be
+       checked against the size Prospero lists for the version. */
+    if (patchdl_fetch_manifest(canon, &mf) != 0)
+        return queue_json(conn, MHD_HTTP_BAD_GATEWAY,
+            "{\"ok\":false,\"reason\":\"manifest_unavailable\"}");
+    found  = mf.total;
+    pieces = mf.count;
+    patchdl_manifest_free(&mf);
+    if (size_mismatch(tid, ver, found, expect, sizeof expect) &&
+        !json_get_bool(body, "force", 0)) {
+        snprintf(resp, sizeof resp,
+                 "{\"ok\":false,\"reason\":\"size_mismatch\","
+                 "\"found_bytes\":%lld,\"pieces\":%d,\"expected\":\"%s\"}",
+                 found, pieces, expect);
+        return queue_json_owned(conn, MHD_HTTP_CONFLICT, strdup(resp));
+    }
+
+    save_manual_source(tid, canon, ver);
+    set_manual_source(tid, canon, ver);
+    return do_download(conn, tid, src, canon, "", tname, ver, en);
 }
 
 /* ---------- request routing -------------------------------------------- */
@@ -2110,6 +2426,8 @@ on_request(void *cls, struct MHD_Connection *conn, const char *url,
             return queue_json_owned(conn, rc == 0 ? MHD_HTTP_OK : MHD_HTTP_BAD_GATEWAY,
                                     strdup(resp));
         }
+        if (!strcmp(url, "/api/download_url"))
+            return handle_download_url(conn, body);
         if (!strcmp(url, "/api/install_tile")) {
             char msg[256], resp[320];
             int  rc = patchdl_tile_install_if_needed(msg, sizeof(msg));
@@ -2393,6 +2711,7 @@ patchdl_websrv_start(unsigned short port) {
 
     /* Flag titles that have a partial download on disk so the UI can offer
        Resume after a reboot. */
+    load_manual_sources();
     detect_resumable_partials();
 
     /* Build the diagnostic dump now, while single-threaded — the root-vnode
