@@ -109,7 +109,9 @@ typedef struct dl_job {
     int                pieces_failed;
     int                inflight;
     int                fd;             /* O_RDWR dest fd, -1 until admit */
-    int                rc;             /* 0 ok, -1 net/io, -2 verify */
+    int                rc;             /* 0 ok, -1 net/io, -2 verify, -3 no space */
+    long long          need_bytes;     /* rc -3: bytes the package still needed */
+    long long          free_bytes;     /* rc -3: bytes free on /data at the time */
     int                last_curl_rc;   /* CURLcode from the most recent piece */
     long               last_http_code; /* HTTP status from the most recent piece */
     struct dl_job     *next;
@@ -640,6 +642,28 @@ data_free_mb(void) {
     return 0;
 }
 
+/* Headroom kept free on /data so a download never fills the console's
+   internal storage to the last byte. */
+#define PATCHDL_SPACE_MARGIN (2LL * 1024 * 1024 * 1024)
+
+/* Bytes still to be written for a package of `total` bytes at `path`: a
+   partial from an earlier run already occupies part of it. */
+static long long
+space_needed(const char *path, long long total) {
+    struct stat st;
+    long long   have = 0;
+    if (stat(path, &st) == 0) have = (long long)st.st_blocks * 512;
+    return total > have ? total - have : 0;
+}
+
+/* 1 if `need` bytes plus the margin fit; *free_out gets the free bytes. */
+static int
+space_ok(long long need, long long *free_out) {
+    long long free_b = data_free_mb() * 1024LL * 1024LL;
+    if (free_out) *free_out = free_b;
+    return need + PATCHDL_SPACE_MARGIN <= free_b;
+}
+
 /* Built fresh per request so free space stays live (a 60+ GB download moves
    it a lot). g_fw is read-only after startup, so this is thread-safe. */
 /* The console's LAN address, so a page opened on the PS5 itself (127.0.0.1)
@@ -950,6 +974,9 @@ build_downloads_json(void) {
         jbuf_appendf(&j, ",\"bytes\":%lld,\"total_bytes\":%lld", bytes, total);
         jbuf_appendf(&j, ",\"rc\":%d,\"last_curl_rc\":%d,\"last_http_code\":%ld",
                      job->rc, job->last_curl_rc, job->last_http_code);
+        if (job->rc == -3)
+            jbuf_appendf(&j, ",\"need_bytes\":%lld,\"free_bytes\":%lld",
+                         job->need_bytes, job->free_bytes);
         jbuf_append(&j, "}");
     }
     jbuf_append(&j, "]");
@@ -1500,8 +1527,8 @@ admit_next(void) {
     dl_job_t          *q = NULL;
     patchdl_manifest_t mf;
     char               murl[768], dest[320], dir[288];
-    int                is_manifest, fd = -1, ok = 0;
-    long long          total = 0, old_size = 0;
+    int                is_manifest, fd = -1, ok = 0, no_space = 0;
+    long long          total = 0, old_size = 0, need = 0, free_b = 0;
     dl_pstate_t       *ps = NULL;
     unsigned char     *bitmap = NULL;
 
@@ -1526,7 +1553,9 @@ admit_next(void) {
     if (is_manifest) {
         if (patchdl_fetch_manifest(murl, &mf) == 0 && mf.count > 0) {
             total = mf.total;
-            fd = open(dest, O_RDWR | O_CREAT, 0666);
+            need  = space_needed(dest, total);
+            if (!space_ok(need, &free_b)) no_space = 1;
+            else fd = open(dest, O_RDWR | O_CREAT, 0666);
             if (fd >= 0) {
                 struct stat st;
                 if (fstat(fd, &st) == 0) old_size = (long long)st.st_size;
@@ -1563,7 +1592,12 @@ admit_next(void) {
         free(ps);
         free(bitmap);
         if (q->state == JOB_CANCELLING) finalize_cancel_locked(q);
-        else { q->state = JOB_FAILED; q->rc = -1; }
+        else {
+            q->state = JOB_FAILED;
+            q->rc = no_space ? -3 : -1;
+            q->need_bytes = need;
+            q->free_bytes = free_b;
+        }
         pthread_cond_broadcast(&g_pool.cv);
         return;
     }
@@ -2125,6 +2159,15 @@ handle_download_url(struct MHD_Connection *conn, const char *body) {
     found  = mf.total;
     pieces = mf.count;
     patchdl_manifest_free(&mf);
+    {
+        long long free_b;
+        if (!space_ok(found, &free_b)) {
+            snprintf(resp, sizeof resp,
+                     "{\"ok\":false,\"reason\":\"no_space\","
+                     "\"need_bytes\":%lld,\"free_bytes\":%lld}", found, free_b);
+            return queue_json_owned(conn, 507, strdup(resp));
+        }
+    }
     if (size_mismatch(tid, ver, found, expect, sizeof expect) &&
         !json_get_bool(body, "force", 0)) {
         snprintf(resp, sizeof resp,

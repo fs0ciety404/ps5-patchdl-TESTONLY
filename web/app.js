@@ -357,9 +357,18 @@ function gameCategory(game) {
     return "blocked";
   if (game.downloading || game.resumable || game.downloaded || game.installing || game._jobState)
     return "updates";
+  if (regionLockedUpdate(game)) return "blocked";
   if (game.status === "checking" || game.status === "available" || hasOlderPatch(game))
     return "updates";
   return "uptodate";
+}
+
+// A disc or store install whose update Sony serves from another region's
+// master package. Sony's installer rejected exactly this kind of install in
+// testing, so offering the download would only lead nowhere.
+function regionLockedUpdate(game) {
+  return game.status === "available" && hasSharedStorage(game) &&
+    Boolean(sourcePolicy(game).allow_install);
 }
 
 // Sony's newest patch needs newer firmware, but Prospero knows an older one
@@ -510,6 +519,7 @@ function primaryButton(game) {
   if (game.installing) return { label: "Installing…", variant: "ghost", disabled: true };
   if (game.downloading) return { label: "Pause", action: "pause", variant: "pause", hint: "Pause the download (keeps what was downloaded)." };
   if (game.patch_title_match === false) return null;
+  if (regionLockedUpdate(game) && !game.downloading && !game.resumable && !game.downloaded) return null;
   if (canGetOlderPatch(game))
     return { label: "Old FW patch", action: "guide", variant: "update", hint: `Get ${game.prospero_version} from Prospero Patches, the newest patch that runs on this firmware.` };
   if (game.resumable && isDownloadAllowed(game))
@@ -553,6 +563,13 @@ function versionsHtml(game) {
   } else if (game.status === "incompatible_fw" && !game.prospero_done) {
     parts.push(`<span>Looking for a patch for this firmware\u2026</span>`);
   }
+  if (regionLockedUpdate(game)) {
+    const master = (game.patch_storage_title_id || "").slice(0, 9);
+    parts.push(`<span class="card-note">Sony serves this update from another region's package${master ? ` (${escapeHtml(master)})` : ""}. The PS5 refuses to install it from homebrew.</span>`);
+  }
+  const job = state.downloads.find((d) => d.title_id === game.title_id);
+  if (job && job.state === "error" && Number(job.rc) === -3)
+    parts.push(`<span class="card-note is-warn">${noSpaceText(job.need_bytes, job.free_bytes)}</span>`);
   if (game.latest_version && game.latest_version !== offered &&
       game.latest_version > (game.installed_version || "")) {
     const fw = game.latest_required_fw ? ` · needs FW ${escapeHtml(game.latest_required_fw)}` : "";
@@ -567,6 +584,7 @@ function statusPill(game) {
   if (sourceType(game) === "fake") return `<span class="pill">Not supported</span>`;
   if (game.patch_title_match === false) return `<span class="pill blocked">Title mismatch</span>`;
   if (game.manual_version || hasOlderPatch(game)) return `<span class="pill prospero">Via Prospero</span>`;
+  if (regionLockedUpdate(game)) return `<span class="pill blocked">Region patch \u00b7 can't install</span>`;
   if (game.status === "available" && !isInstallAllowed(game))
     return `<span class="pill warn">Download only</span>`;
   if (game.status === "available") return `<span class="pill ok">Update available</span>`;
@@ -577,7 +595,7 @@ function statusPill(game) {
 }
 
 function storagePill(game) {
-  return hasSharedStorage(game) ? `<span class="pill warn">Shared master</span>` : "";
+  return hasSharedStorage(game) && !regionLockedUpdate(game) ? `<span class="pill warn">Shared master</span>` : "";
 }
 
 function sourcePill(game) {
@@ -654,6 +672,7 @@ function reconcileFromJobs(jobs) {
     g._localDownloading = false; // the pool now tracks it
     g._jobState = j.state;
     if (j.state === "active" || j.state === "queued") {
+      g._spaceWarned = false;
       g.downloading = true;
       g.resumable = false;
       g._wasActive = true;
@@ -677,7 +696,10 @@ function reconcileFromJobs(jobs) {
       // network failure. Reflect that so primaryButton shows "Resume" and the
       // red Cancel stays available to delete the kept partial.
       const bytes = Number(j.bytes) || 0;
-      if (g._wasActive) {
+      if (Number(j.rc) === -3) {
+        if (!g._spaceWarned) showToast(`${g.name}: ${noSpaceText(j.need_bytes, j.free_bytes)}`);
+        g._spaceWarned = true;
+      } else if (g._wasActive) {
         showToast(`${g.name}: download failed${bytes > 0 ? " — partial kept, press Resume to continue" : "."}`);
       }
       g._wasActive = false;
@@ -1110,10 +1132,16 @@ const REASON_TEXT = {
   url_title_mismatch: "That link belongs to a different game.",
   url_not_allowed: "Only Sony CDN links (https) are accepted.",
   url_invalid: "The link contains unexpected characters.",
+  no_space: "Not enough free space on the PS5.",
   manifest_unavailable: "The PS5 could not load the package list from Sony. Copy the SC link again and retry.",
   download_exists: "A download already exists for this game. Cancel it first.",
   source_not_supported: "Downloads are not supported for this source.",
 };
+// The server keeps 2 GB free on /data on top of the package itself.
+function noSpaceText(need, free) {
+  return `Not enough space on the PS5: needs ${formatBytes(need)} plus 2 GB headroom, ${formatBytes(free)} free.`;
+}
+
 function reasonText(error) {
   const r = error && error.body && error.body.reason;
   return (r && REASON_TEXT[r]) || (error && error.message) || "failed";
@@ -1378,26 +1406,24 @@ function clearGuideHash() {
     history.replaceState(null, "", location.pathname + location.search);
 }
 
+// The PS5 browser can't copy links, so on the console the guide only hands
+// over to a phone. Opened via the home-screen tile the page runs on 127.0.0.1.
+function isConsoleBrowser() {
+  const h = location.hostname;
+  return /PlayStation/i.test(navigator.userAgent) || h === "127.0.0.1" || h === "localhost";
+}
+
 function openGuide(game, fromLink = false) {
   closeGuide();
   Object.assign(guide, { game, fromLink, started: false, busy: false, lastUrl: "",
                          returnFocus: document.activeElement });
   const ver = escapeHtml(game.prospero_version);
   const size = game.prospero_size ? ` (${escapeHtml(game.prospero_size)})` : "";
+  const onConsole = !fromLink && isConsoleBrowser();
   const link = fromLink ? null : phoneLink(game);
   const matrix = link ? qrEncode(link) : null;
-  const handoff = matrix
-    ? `<div class="guide-qr">${qrSvg(matrix)}<div>
-         <strong>Easier on your phone</strong>
-         <span>Scan this with your phone camera and continue there. Copying a link works much better on a phone. This screen follows along.</span>
-         <code>${escapeHtml(link)}</code>
-       </div></div>`
-    : "";
 
-  const wrap = document.createElement("div");
-  wrap.className = "guide-backdrop";
-  wrap.innerHTML = `
-    <section class="guide" role="dialog" aria-modal="true" aria-labelledby="guideTitle">
+  const head = `
       <header class="guide-head">
         <div>
           <p class="eyebrow">Old FW patch</p>
@@ -1405,7 +1431,26 @@ function openGuide(game, fromLink = false) {
           <p class="guide-game">${escapeHtml(game.name)}</p>
         </div>
         <button class="icon-button guide-close" type="button" aria-label="Close">×</button>
-      </header>
+      </header>`;
+
+  let body;
+  if (onConsole) {
+    body = matrix
+      ? `<div class="guide-handoff">${qrSvg(matrix)}
+           <p>Scan this code with your phone, or open this link on your phone:</p>
+           <code>${escapeHtml(link)}</code>
+         </div>`
+      : `<p class="guide-why">Open PatchDL on your phone (this console's IP address, port ${escapeHtml(String(state.status.http_port || 12880))}) and pick the game there.</p>`;
+    body += `<div class="guide-status" role="status" aria-live="polite"></div>`;
+  } else {
+    const handoff = matrix
+      ? `<div class="guide-qr">${qrSvg(matrix)}<div>
+           <strong>Easier on your phone</strong>
+           <span>Scan this with your phone camera and continue there. This screen follows along.</span>
+           <code>${escapeHtml(link)}</code>
+         </div></div>`
+      : "";
+    body = `
       <p class="guide-why">Sony only offers ${escapeHtml(game.latest_version || "the newest patch")}, which needs FW ${escapeHtml(game.latest_required_fw || "?")}. Prospero Patches still lists <b>${ver}</b>, which runs on FW ${escapeHtml(game.prospero_required_fw || "?")}.</p>
       ${handoff}
       <ol class="guide-steps">
@@ -1427,27 +1472,33 @@ function openGuide(game, fromLink = false) {
           </div>
           <div class="guide-status" role="status" aria-live="polite"></div>
         </li>
-      </ol>
-    </section>`;
+      </ol>`;
+  }
+
+  const wrap = document.createElement("div");
+  wrap.className = "guide-backdrop";
+  wrap.innerHTML = `<section class="guide${onConsole ? " is-handoff" : ""}" role="dialog" aria-modal="true" aria-labelledby="guideTitle">${head}${body}</section>`;
   document.body.appendChild(wrap);
   guide.el = wrap;
 
   const input = wrap.querySelector(".guide-input");
-  const tryInput = () => {
-    const url = extractLink(input.value);
-    if (url && url !== guide.lastUrl && /\.(pkg|crc|json)$/i.test(url)) guideSubmit(url, false);
-  };
-  input.addEventListener("focus", () => input.select());   // a paste then replaces the old link
-  input.addEventListener("input", tryInput);
-  input.addEventListener("paste", () => setTimeout(tryInput, 0));
-  wrap.querySelector(".guide-start").addEventListener("click",
-    () => guideSubmit(extractLink(input.value), false));
+  if (input) {
+    const tryInput = () => {
+      const url = extractLink(input.value);
+      if (url && url !== guide.lastUrl && /\.(pkg|crc|json)$/i.test(url)) guideSubmit(url, false);
+    };
+    input.addEventListener("focus", () => input.select());   // a paste then replaces the old link
+    input.addEventListener("input", tryInput);
+    input.addEventListener("paste", () => setTimeout(tryInput, 0));
+    wrap.querySelector(".guide-start").addEventListener("click",
+      () => guideSubmit(extractLink(input.value), false));
+  }
   wrap.querySelector(".guide-close").addEventListener("click", closeGuide);
   wrap.addEventListener("click", (e) => { if (e.target === wrap) closeGuide(); });
   guide.onKey = (e) => { if (e.key === "Escape") closeGuide(); };
   document.addEventListener("keydown", guide.onKey);
 
-  guideStatus("idle", matrix ? "Waiting for the link…" : "");
+  guideStatus("idle", matrix ? "Waiting for the link from your phone…" : "");
   guide.timer = setInterval(guidePoll, 2000);
   (fromLink ? wrap.querySelector(".guide-open") : wrap.querySelector(".guide-close")).focus();
 }
@@ -1503,7 +1554,9 @@ async function guideSubmit(url, force) {
     if (!guide.el) return;
     start.disabled = false;
     const b = (error && error.body) || {};
-    if (b.reason === "size_mismatch") {
+    if (b.reason === "no_space") {
+      guideStatus("error", escapeHtml(noSpaceText(b.need_bytes, b.free_bytes)));
+    } else if (b.reason === "size_mismatch") {
       guideStatus("warn",
         `This link is ${formatBytes(b.found_bytes)} in ${Number(b.pieces) || "?"} pieces, but ${escapeHtml(game.prospero_version)} should be about ${escapeHtml(b.expected || "?")}. It is probably a different version.`,
         { label: "Download anyway", run: () => guideSubmit(url, true) });
