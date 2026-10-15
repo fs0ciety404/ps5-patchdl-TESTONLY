@@ -39,8 +39,9 @@ The UI assumes deny-by-default behavior:
   "source_policy": {
     "official": { "allow_check": true, "allow_download": true, "allow_install": true },
     "external": { "allow_check": true, "allow_download": true, "allow_install": true },
-    "shadowmount": { "allow_check": true, "allow_download": true, "allow_install": false },
-    "unknown": { "allow_check": true, "allow_download": false, "allow_install": false }
+    "shadowmount": { "allow_check": true, "allow_download": false, "allow_install": false },
+    "unknown": { "allow_check": true, "allow_download": false, "allow_install": false },
+    "fake": { "allow_check": true, "allow_download": false, "allow_install": false }
   },
   "cdn_allowlist": [
     "sgst.prod.dl.playstation.net",
@@ -70,7 +71,7 @@ Per-title source fields:
   "source_path": "/system_ex/app/PPSA90001_00",
   "mount_from": "/mnt/usb0/itemzflow/Shadowmounted Test Title",
   "enabled": true,
-  "mode": "download_only"
+  "mode": "disabled"
 }
 ```
 
@@ -83,16 +84,17 @@ shadowmount
 unknown
 ```
 
-The frontend treats `shadowmount` as download-only and `unknown` as blocked for
-downloads and installs. Backend code should enforce the same policy even if a
-client sends a forged request.
+The frontend lists `shadowmount`, `unknown` and `fake` titles under *Not
+supported* and offers neither download nor install for them. The backend refuses
+both as well, even if a client sends a forged request.
 
 For PS5 game updates, the backend may turn a Sony `manifest_url` into a merged
 local `.pkg` by downloading all manifest pieces. The `delta_url` `*-DP.pkg` is
 not shown as a separate user action because it can bootstrap the storage/master
 title instead of the installed regional target.
 
-If `patch_storage_match` is false, the UI keeps download/verify available but
-does not offer install or auto-install. Those shared-master packages are signed
-for a different storage title id and cannot be retargeted by standalone
-AppInstUtil on firmware 11.60.
+If `patch_storage_match` is false, the CDN stores the patch pieces under another
+regional (master) title id. That is fine: the merged `.pkg` assembled from the
+manifest carries the installed title's own content id, and AppInstUtil
+`AppInstallPkg` installs it onto that title. The UI only adds a "Shared master"
+label.

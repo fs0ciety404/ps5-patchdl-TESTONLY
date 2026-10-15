@@ -2647,7 +2647,9 @@ on_request(void *cls, struct MHD_Connection *conn, const char *url,
     }
 
     /* Read-only: report the .pkg's embedded content id / title id vs the target
-       (installed app) ids, to expose the cross-region linkage. No install. */
+       (installed app) ids. AppInstallPkg installs by the id inside the package,
+       so it lands on the game only when they match; where the CDN stores the
+       pieces (storage_title_id) doesn't matter. No install. */
     if (!strncmp(url, "/api/pkgmeta/", 13)) {
         const char      *tid = url + 13;
         char             purl[768] = {0}, durl_[512] = {0};
@@ -2670,13 +2672,11 @@ on_request(void *cls, struct MHD_Connection *conn, const char *url,
         snprintf(resp, sizeof resp,
                  "{\"ok\":%s,\"pkg_content_id\":\"%s\",\"pkg_title_id\":\"%s\","
                  "\"is_app\":%s,\"target_content_id\":\"%s\",\"target_title_id\":\"%s\","
-                 "\"storage_title_id\":\"%s\",\"installable\":%s,\"install_plan\":\"%s\","
-                 "\"msg\":\"%s\"}",
+                 "\"storage_title_id\":\"%s\",\"installable\":%s,"
+                 "\"install_plan\":\"appinstallpkg\",\"msg\":\"%s\"}",
                  rc == 0 ? "true" : "false", ecid, etid, is_app ? "true" : "false",
                  cid, tid, psti,
-                 (psti[0] && strncmp(psti, tid, 9) != 0) ? "false" : "true",
-                 (psti[0] && strncmp(psti, tid, 9) != 0) ?
-                    "cross_region_storage_unsupported" : "installbypackage",
+                 (rc == 0 && !strncmp(etid, tid, 9)) ? "true" : "false",
                  msg);
         return queue_json_owned(conn, MHD_HTTP_OK, strdup(resp));
     }

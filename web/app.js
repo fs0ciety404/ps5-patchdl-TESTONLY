@@ -1102,7 +1102,6 @@ async function postJson(url, body) {
 
 const REASON_TEXT = {
   patch_title_mismatch: "Patch metadata targets a different title - install blocked.",
-  cross_region_storage_unsupported: "Patch bytes are signed for a shared master title; this standalone installer cannot retarget them.",
   install_not_allowed_for_source: "Install blocked for this source.",
   source_unknown: "Source unknown — blocked.",
   source_fake: "Fake packages are not supported.",
