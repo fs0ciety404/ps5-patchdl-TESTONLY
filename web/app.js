@@ -12,6 +12,7 @@ const SOURCE_TYPES = {
   external:    { label: "External",    className: "external", installAllowed: true,  description: "Real external installation" },
   shadowmount: { label: "Shadowmount", className: "shadow",   installAllowed: false, description: "Download only" },
   unknown:     { label: "Unknown",     className: "blocked",  installAllowed: false, description: "Blocked" },
+  fake:        { label: "Fake package", className: "blocked", installAllowed: false, description: "Not supported" },
 };
 
 const fallback = {
@@ -36,6 +37,7 @@ const fallback = {
       external: { allow_check: true, allow_download: true, allow_install: true },
       shadowmount: { allow_check: true, allow_download: true, allow_install: false },
       unknown: { allow_check: true, allow_download: false, allow_install: false },
+      fake: { allow_check: false, allow_download: false, allow_install: false },
     },
     cdn_allowlist: [
       "sgst.prod.dl.playstation.net",
@@ -494,6 +496,7 @@ function stopButton(game) {
 function statusPill(game) {
   if (game.installing) return `<span class="pill warn">Installing…</span>`;
   if (game.status === "checking") return `<span class="pill">Checking…</span>`;
+  if (sourceType(game) === "fake") return `<span class="pill">Not supported</span>`;
   if (game.patch_title_match === false) return `<span class="pill blocked">Title mismatch</span>`;
   if (game.status === "available") return `<span class="pill ok">Update available</span>`;
   if (game.status === "incompatible_fw") return `<span class="pill warn">Needs FW ${escapeHtml(game.latest_required_fw || "")}</span>`;
@@ -1021,6 +1024,7 @@ const REASON_TEXT = {
   cross_region_storage_unsupported: "Patch bytes are signed for a shared master title; this standalone installer cannot retarget them.",
   install_not_allowed_for_source: "Install blocked for this source.",
   source_unknown: "Source unknown — blocked.",
+  source_fake: "Fake packages are not supported.",
   no_compatible_patch: "No compatible patch available.",
   download_failed: "Download failed.",
   download_in_progress: "Another download is already running.",

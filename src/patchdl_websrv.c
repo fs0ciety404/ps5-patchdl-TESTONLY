@@ -136,7 +136,8 @@ static const char config_tail_json[] =
   "\"official\":{\"allow_check\":true,\"allow_download\":true,\"allow_install\":true},"
   "\"external\":{\"allow_check\":true,\"allow_download\":true,\"allow_install\":true},"
   "\"shadowmount\":{\"allow_check\":true,\"allow_download\":true,\"allow_install\":false},"
-  "\"unknown\":{\"allow_check\":true,\"allow_download\":false,\"allow_install\":false}"
+  "\"unknown\":{\"allow_check\":true,\"allow_download\":false,\"allow_install\":false},"
+  "\"fake\":{\"allow_check\":false,\"allow_download\":false,\"allow_install\":false}"
   "},"
   "\"cdn_allowlist\":["
   "\"sgst.prod.dl.playstation.net\","
@@ -721,7 +722,8 @@ load_config(void) {
 static const char *
 title_status_str(const patchdl_title_t *t) {
     if (!t->verxml_done)                          return "checking";
-    if (t->source_type == PATCHDL_SOURCE_UNKNOWN) return "blocked";
+    if (t->source_type == PATCHDL_SOURCE_UNKNOWN ||
+        t->source_type == PATCHDL_SOURCE_FAKE)    return "blocked";
     if (t->compatible_version[0]) {
         /* Versions are zero-padded (01.000.011), so strcmp orders them.
            A compatible patch newer than what's installed = update available. */
@@ -750,6 +752,7 @@ title_mode_str(patchdl_source_t src) {
     switch (src) {
     case PATCHDL_SOURCE_SHADOWMOUNT: return "download_only";
     case PATCHDL_SOURCE_UNKNOWN:     return "disabled";
+    case PATCHDL_SOURCE_FAKE:        return "disabled";
     default:                          return "latest_compatible";
     }
 }
@@ -778,6 +781,11 @@ build_titles_json(void) {
             jbuf_append_ver_or_null(&j, t->latest_required_fw);
         jbuf_append(&j, ",\"source_type\":");
             jbuf_append_str(&j, patchdl_source_str(t->source_type));
+        jbuf_append(&j, ",\"pkg_sign\":");
+            jbuf_append_str(&j, t->pkg_sign == PATCHDL_PKG_RETAIL ? "retail"
+                              : t->pkg_sign == PATCHDL_PKG_FAKE   ? "fake"
+                              : t->pkg_sign == PATCHDL_PKG_UNREAD ? "unreadable"
+                                                                  : "none");
         jbuf_append(&j, ",\"source_path\":");  jbuf_append_str(&j, t->source_path);
         jbuf_append(&j, ",\"mount_from\":");   jbuf_append_str(&j, t->mount_from);
         jbuf_append(&j, ",\"version_file_uri\":");
@@ -910,6 +918,15 @@ verxml_fetch_thread(void *arg) {
         if (g_verxml_stop) break;   /* shutdown: stop before the next blocking query */
         memset(&info, 0, sizeof(info));
 
+        /* Fake packages get no update check at all: PatchDL never offers an
+           official patch for them, so there is nothing to ask Sony about. */
+        if (t->source_type == PATCHDL_SOURCE_FAKE) {
+            pthread_mutex_lock(&g_mutex);
+            t->verxml_done = 1;
+            pthread_mutex_unlock(&g_mutex);
+            continue;
+        }
+
         /* The version.xml URL comes straight from the app.db (UUID included);
            fall back to the resolver only if the app.db had no entry. */
         if (t->version_file_uri[0])
@@ -994,6 +1011,8 @@ set_title_enabled(struct MHD_Connection *conn, const char *title_id, int en) {
     pthread_mutex_lock(&g_mutex);
     for (size_t i = 0; i < g_title_count; i++) {
         if (!strcmp(g_titles[i].title_id, title_id)) {
+            /* Fake packages stay off; the toggle can't switch them on. */
+            if (g_titles[i].source_type == PATCHDL_SOURCE_FAKE) en = 0;
             g_titles[i].enabled = en;
             found = 1;
             break;
@@ -1548,6 +1567,9 @@ do_download(struct MHD_Connection *conn, const char *title_id,
     if (src == PATCHDL_SOURCE_UNKNOWN)
         return queue_json(conn, MHD_HTTP_FORBIDDEN,
                           "{\"ok\":false,\"reason\":\"source_unknown\"}");
+    if (src == PATCHDL_SOURCE_FAKE)
+        return queue_json(conn, MHD_HTTP_FORBIDDEN,
+                          "{\"ok\":false,\"reason\":\"source_fake\"}");
     if (!patch_url[0])
         return queue_json(conn, MHD_HTTP_CONFLICT,
                           "{\"ok\":false,\"reason\":\"no_compatible_patch\"}");
@@ -1713,7 +1735,7 @@ do_install(struct MHD_Connection *conn, const char *title_id,
                           "{\"ok\":false,\"reason\":\"title_disabled\"}");
 
     /* Source policy: only genuine installs may be patched in place.
-       Shadowmounts are download-only; unknown/preinstall are blocked. */
+       Shadowmounts are download-only; unknown and fake packages are blocked. */
     if (src != PATCHDL_SOURCE_OFFICIAL && src != PATCHDL_SOURCE_EXTERNAL)
         return queue_json(conn, MHD_HTTP_FORBIDDEN,
                           "{\"ok\":false,\"reason\":\"install_not_allowed_for_source\"}");
@@ -2318,6 +2340,10 @@ patchdl_websrv_start(unsigned short port) {
     for (size_t i = 0; i < g_title_count; i++)
         g_titles[i].enabled = (g_titles[i].source_type != PATCHDL_SOURCE_UNKNOWN);
     load_config();
+    /* A saved config must not switch a fake package back on. */
+    for (size_t i = 0; i < g_title_count; i++)
+        if (g_titles[i].source_type == PATCHDL_SOURCE_FAKE)
+            g_titles[i].enabled = 0;
 
     /* If the user opted into a home-screen tile, refresh it now. The helper
        is stat-guarded — when nothing changed on disk it's a no-op, so the

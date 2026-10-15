@@ -237,6 +237,32 @@ read_small_file(const char *dir, const char *rel, char *buf, size_t sz) {
     return 0;
 }
 
+/* Tell a Sony-signed package from a debug/fake-signed one by its header.
+   PS5 finalized image "\x7FFIH": byte 0x05 is 0x80 for retail, 0x00 for
+   debug (matches Sony's CDN patches, which start 7F 46 49 48 01 80).
+   PS4 container "\x7FCNT": bit 0 of byte 4 is set for retail, clear for a
+   fake package (same test Itemzflow uses). */
+static patchdl_pkg_sign_t
+pkg_sign_state(const char *dir) {
+    char          p[PATH_MAX];
+    unsigned char h[8];
+    FILE         *fp;
+    size_t        n;
+
+    snprintf(p, sizeof(p), "%s/app.pkg", dir);
+    fp = fopen(p, "rb");
+    if (!fp) return PATCHDL_PKG_UNREAD;
+    n = fread(h, 1, sizeof(h), fp);
+    fclose(fp);
+    if (n < sizeof(h)) return PATCHDL_PKG_UNREAD;
+
+    if (!memcmp(h, "\x7f" "FIH", 4))
+        return (h[5] & 0x80) ? PATCHDL_PKG_RETAIL : PATCHDL_PKG_FAKE;
+    if (!memcmp(h, "\x7f" "CNT", 4))
+        return (h[4] & 0x01) ? PATCHDL_PKG_RETAIL : PATCHDL_PKG_FAKE;
+    return PATCHDL_PKG_UNREAD;
+}
+
 /* Keep only actual games. Skip PS5 system apps (NPXS), the Payload Manager
    fake app (PLDM) and ELF-loader homebrew (PSPS). */
 static int
@@ -270,8 +296,9 @@ mount_is_shadow(const char *title_id, const struct statfs *mounts, int nmounts) 
  * Classify each /user/app/<TID> (verified on fw 11.60):
  *   - mount table references /mnt/shadowmnt for the title -> ShadowMountPlus
  *     mount (authoritative; mount.lnk is only a fallback hint)
- *   - app.pkg (no shadow mount) -> genuine install; app.json with CDN piece
- *     URLs means a not-downloaded preinstall stub, local URLs a real install
+ *   - app.pkg (no shadow mount) -> its header decides: Sony-signed is a
+ *     genuine install (store or disc), debug/fake-signed is a fake package
+ *     (listed, but never checked, downloaded or patched), unreadable is unknown
  *   - app.json with "fake":true -> homebrew fake (skip)
  */
 static int
@@ -279,7 +306,7 @@ scan_one(const char *base, const char *name, patchdl_title_t *t,
          const struct statfs *mounts, int nmounts) {
     char dir[PATH_MAX];
     char appjson[4096];
-    int  has_mountlnk, has_app_pkg, has_paramjson, is_shadow, is_fake = 0, is_cdn = 0;
+    int  has_mountlnk, has_app_pkg, has_paramjson, is_shadow, is_fake = 0;
 
     snprintf(dir, sizeof(dir), "%s/%s", base, name);
     memset(t, 0, sizeof(*t));
@@ -298,8 +325,6 @@ scan_one(const char *base, const char *name, patchdl_title_t *t,
     if (!read_small_file(dir, "app.json", appjson, sizeof(appjson))) {
         if (strstr(appjson, "\"fake\"") && strstr(appjson, "true"))
             is_fake = 1;
-        if (strstr(appjson, "http"))
-            is_cdn = 1; /* piece URLs point at the Sony CDN -> preinstall */
     }
     if (is_fake)
         return -1;
@@ -309,8 +334,12 @@ scan_one(const char *base, const char *name, patchdl_title_t *t,
        app.pkg is the reliable genuine-vs-shadow discriminator — independent of
        whether the shadow image is currently mounted. */
     if (has_app_pkg) {
-        t->source_type = is_cdn ? PATCHDL_SOURCE_UNKNOWN  /* CDN pkg = preinstall */
-                                : PATCHDL_SOURCE_OFFICIAL;
+        /* app.json piece URLs are no signal: disc and store installs carry
+           CDN URLs there too. The package header is. */
+        t->pkg_sign = pkg_sign_state(dir);
+        t->source_type = t->pkg_sign == PATCHDL_PKG_RETAIL ? PATCHDL_SOURCE_OFFICIAL
+                       : t->pkg_sign == PATCHDL_PKG_FAKE   ? PATCHDL_SOURCE_FAKE
+                                                           : PATCHDL_SOURCE_UNKNOWN;
     } else if (is_shadow || has_mountlnk || has_paramjson ||
                path_exists(dir, "sce_sys/param.sfo")) {
         if (try_param_json(dir, t)) /* metadata from the mounted sce_sys */
@@ -365,6 +394,7 @@ patchdl_source_str(patchdl_source_t src) {
     case PATCHDL_SOURCE_OFFICIAL:    return "official";
     case PATCHDL_SOURCE_EXTERNAL:    return "external";
     case PATCHDL_SOURCE_SHADOWMOUNT: return "shadowmount";
+    case PATCHDL_SOURCE_FAKE:        return "fake";
     default:                          return "unknown";
     }
 }

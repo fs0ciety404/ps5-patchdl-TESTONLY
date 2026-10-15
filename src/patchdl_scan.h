@@ -17,7 +17,16 @@ typedef enum {
     PATCHDL_SOURCE_EXTERNAL    = 1,
     PATCHDL_SOURCE_SHADOWMOUNT = 2,
     PATCHDL_SOURCE_UNKNOWN     = 3,
+    PATCHDL_SOURCE_FAKE        = 4, /* debug/fake-signed package: not supported */
 } patchdl_source_t;
+
+/* Signing state read from the installed app.pkg header. */
+typedef enum {
+    PATCHDL_PKG_NONE    = 0, /* no app.pkg */
+    PATCHDL_PKG_RETAIL  = 1,
+    PATCHDL_PKG_FAKE    = 2,
+    PATCHDL_PKG_UNREAD  = 3, /* app.pkg present but header unreadable/unknown */
+} patchdl_pkg_sign_t;
 
 typedef struct {
     char             title_id[32];
@@ -28,6 +37,7 @@ typedef struct {
     char             mount_from[256];
     char             version_file_uri[256]; /* from app.db, for version.xml */
     patchdl_source_t source_type;
+    patchdl_pkg_sign_t pkg_sign;      /* app.pkg header verdict, for diagnostics */
     /* populated by background verxml fetch — guarded by websrv mutex */
     char             compatible_version[16];
     char             latest_version[16];
