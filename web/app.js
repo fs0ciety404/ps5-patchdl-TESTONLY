@@ -358,18 +358,9 @@ function gameCategory(game) {
     return "blocked";
   if (game.downloading || game.resumable || game.downloaded || game.installing || game._jobState)
     return "updates";
-  if (regionLockedUpdate(game)) return "blocked";
   if (game.status === "checking" || game.status === "available" || hasOlderPatch(game))
     return "updates";
   return "uptodate";
-}
-
-// A disc or store install whose update Sony serves from another region's
-// master package. Sony's installer rejected exactly this kind of install in
-// testing, so offering the download would only lead nowhere.
-function regionLockedUpdate(game) {
-  return game.status === "available" && hasSharedStorage(game) &&
-    Boolean(sourcePolicy(game).allow_install);
 }
 
 // Sony's newest patch needs newer firmware, but Prospero knows an older one
@@ -520,7 +511,6 @@ function primaryButton(game) {
   if (game.installing) return { label: "Installing…", variant: "ghost", disabled: true };
   if (game.downloading) return { label: "Pause", action: "pause", variant: "pause", hint: "Pause the download (keeps what was downloaded)." };
   if (game.patch_title_match === false) return null;
-  if (regionLockedUpdate(game) && !game.downloading && !game.resumable && !game.downloaded) return null;
   if (canGetOlderPatch(game))
     return { label: "Old FW patch", action: "guide", variant: "update", hint: `Get ${game.prospero_version} from Prospero Patches, the newest patch that runs on this firmware.` };
   if (game.resumable && isDownloadAllowed(game))
@@ -564,10 +554,6 @@ function versionsHtml(game) {
   } else if (game.status === "incompatible_fw" && !game.prospero_done) {
     parts.push(`<span>Looking for a patch for this firmware\u2026</span>`);
   }
-  if (regionLockedUpdate(game)) {
-    const master = (game.patch_storage_title_id || "").slice(0, 9);
-    parts.push(`<span class="card-note">Sony serves this update from another region's package${master ? ` (${escapeHtml(master)})` : ""}. The PS5 refuses to install it from homebrew.</span>`);
-  }
   const job = state.downloads.find((d) => d.title_id === game.title_id);
   if (job && job.state === "error" && Number(job.rc) === -3)
     parts.push(`<span class="card-note is-warn">${noSpaceText(job.need_bytes, job.free_bytes)}</span>`);
@@ -586,7 +572,6 @@ function statusPill(game) {
     return `<span class="pill">Not supported</span>`;
   if (game.patch_title_match === false) return `<span class="pill blocked">Title mismatch</span>`;
   if (game.manual_version || hasOlderPatch(game)) return `<span class="pill prospero">Via Prospero</span>`;
-  if (regionLockedUpdate(game)) return `<span class="pill blocked">Region patch \u00b7 can't install</span>`;
   if (game.status === "available") return `<span class="pill ok">Update available</span>`;
   if (game.status === "incompatible_fw")
     return `<span class="pill">Newest needs FW ${escapeHtml(game.latest_required_fw || "?")}</span>`;
@@ -595,7 +580,7 @@ function statusPill(game) {
 }
 
 function storagePill(game) {
-  return hasSharedStorage(game) && sourcePolicy(game).allow_install && !regionLockedUpdate(game)
+  return hasSharedStorage(game) && sourcePolicy(game).allow_install
     ? `<span class="pill warn">Shared master</span>` : "";
 }
 
@@ -1089,7 +1074,6 @@ function isInstallAllowed(game) {
     game.enabled !== false &&
     (game.compatible_version || game.manual_version) &&
     game.patch_title_match !== false &&
-    !hasSharedStorage(game) &&
     sourcePolicy(game).allow_install
   );
 }
