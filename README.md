@@ -28,11 +28,12 @@
 
 ## Highlights
 
-- **Your whole library at a glance.** Every installed game shows up with its version and the newest update Sony offers for it.
+- **Your whole library at a glance.** Every installed game shows up with its icon, its version and the newest update Sony offers for it, sorted A to Z.
 - **Update all.** One click queues every game that has an update. PatchDL works through the queue and installs each update as soon as it lands.
 - **Fast downloads.** Up to 16 parallel connections per update. Change the number in Settings while a download runs.
 - **Survives reboots.** Pause, resume, or lose power: PatchDL saves progress after every finished piece and continues where it stopped.
-- **Made for your firmware.** You only see updates your console can run, so no game ends up asking for newer system software.
+- **Made for your firmware.** You only see updates your console can run. When the newest one needs a newer firmware, PatchDL says so: *Needs FW 13.20*.
+- **Knows where each game came from.** PatchDL checks every game's package and recognizes disc and PlayStation Store installs. It only ever patches games Sony signed.
 - **Checked against Sony's checksums.** Turn on verification and PatchDL compares every piece with the SHA-256 Sony publishes for it.
 - **A tile on your home screen.** One toggle adds PatchDL to the PS5 home screen. Tap it and the UI opens in the console's browser.
 - **Live progress.** A banner at the top shows the current game, speed, time left and where you are in the queue.
@@ -41,12 +42,15 @@
 
 <table>
   <tr>
-    <td align="center" width="50%"><img src="docs/images/games.jpg" width="420" alt="Games view with a running download"><br><sub><b>Games</b> &nbsp;·&nbsp; every game, its version and the update waiting for it</sub></td>
-    <td align="center" width="50%"><img src="docs/images/queue.jpg" width="420" alt="Updating view with two queued updates"><br><sub><b>Updating</b> &nbsp;·&nbsp; the queue, next to the download that's running</sub></td>
+    <td align="center" width="50%"><img src="docs/images/games.jpg" width="420" alt="Games view with a running download"><br><sub><b>Games</b> &nbsp;·&nbsp; every update waiting for you, one click away</sub></td>
+    <td align="center" width="50%"><img src="docs/images/library.jpg" width="420" alt="Full library with game icons, sorted by name"><br><sub><b>Library</b> &nbsp;·&nbsp; icons, versions and firmware needs, A to Z</sub></td>
   </tr>
   <tr>
+    <td align="center" width="50%"><img src="docs/images/queue.jpg" width="420" alt="Updating view with two queued updates"><br><sub><b>Updating</b> &nbsp;·&nbsp; the queue, next to the download that's running</sub></td>
     <td align="center" width="50%"><img src="docs/images/settings.jpg" width="420" alt="Settings view"><br><sub><b>Settings</b> &nbsp;·&nbsp; changes apply right away, no restart</sub></td>
-    <td align="center" width="50%"><img src="docs/images/tile-homescreen.jpg" width="420" alt="PatchDL tile on the PS5 home screen"><br><sub><b>Home screen</b> &nbsp;·&nbsp; the PatchDL tile on a real PS5</sub></td>
+  </tr>
+  <tr>
+    <td align="center" colspan="2"><img src="docs/images/tile-homescreen.jpg" width="420" alt="PatchDL tile on the PS5 home screen"><br><sub><b>Home screen</b> &nbsp;·&nbsp; the PatchDL tile on a real PS5</sub></td>
   </tr>
 </table>
 
@@ -71,6 +75,9 @@ Start an update from the couch with your phone, check on it from your laptop, or
 
 **Does PatchDL download games?**
 No. It fetches updates for games that are already installed on your console. Nothing else.
+
+**Which games does PatchDL update?**
+Games you installed from disc or from the PlayStation Store. PatchDL reads each game's package before it offers anything, and it leaves every other title alone.
 
 **Where do the updates come from?**
 From Sony's official update servers, the same files your console downloads on its own. PatchDL only talks to a short list of PlayStation CDN hosts.
