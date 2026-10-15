@@ -115,6 +115,25 @@ patchdl_appdb_load(patchdl_appinfo_t **out, size_t *count) {
     }
 
     sqlite3_finalize(stmt);
+
+    /* Icon paths in a separate query: if a firmware lacks the icon0Info
+       column, only the icons go missing, not the whole title list. */
+    if (sqlite3_prepare_v2(db,
+            "SELECT titleId, icon0Info FROM tbl_contentinfo "
+            "WHERE icon0Info IS NOT NULL AND icon0Info != '';",
+            -1, &stmt, NULL) == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *tid  = (const char *)sqlite3_column_text(stmt, 0);
+            const char *icon = (const char *)sqlite3_column_text(stmt, 1);
+            patchdl_appinfo_t *e;
+            if (!tid || !icon) continue;
+            e = (patchdl_appinfo_t *)patchdl_appdb_find(arr, n, tid);
+            if (!e || e->icon_path[0]) continue;
+            strncpy(e->icon_path, icon, sizeof(e->icon_path) - 1);
+            e->icon_path[strcspn(e->icon_path, "?")] = '\0';
+        }
+        sqlite3_finalize(stmt);
+    }
     sqlite3_close(db);
 
     *out = arr;

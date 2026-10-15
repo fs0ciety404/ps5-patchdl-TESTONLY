@@ -374,7 +374,9 @@ h2 { font-size: 18px; line-height: 1.2; }
   border-radius: 10px;
   font-size: 14px;
   font-weight: 800;
+  overflow: hidden;
 }
+.cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
 
 .card-body { min-width: 0; }
 .card-body h3 { margin: 0 0 6px; overflow-wrap: anywhere; font-size: 16px; }

@@ -332,6 +332,44 @@ queue_json_owned(struct MHD_Connection *conn, unsigned int status, char *json) {
                         json, strlen(json), MHD_RESPMEM_MUST_FREE);
 }
 
+/* Serve a title's icon from the fd the scan opened. Icons don't change while
+   PatchDL runs, so the browser may cache them; the card list re-renders on
+   every poll and would otherwise refetch all of them. */
+static enum MHD_Result
+queue_icon(struct MHD_Connection *conn, const char *title_id) {
+    struct MHD_Response *resp;
+    enum MHD_Result      ret;
+    struct stat          st;
+    unsigned char       *buf;
+    int                  fd = -1;
+
+    pthread_mutex_lock(&g_mutex);
+    for (size_t i = 0; i < g_title_count; i++)
+        if (!strcmp(g_titles[i].title_id, title_id)) {
+            fd = g_titles[i].icon_fd;
+            break;
+        }
+    pthread_mutex_unlock(&g_mutex);
+
+    if (fd < 0 || fstat(fd, &st) || st.st_size <= 0)
+        return queue_text(conn, MHD_HTTP_NOT_FOUND, "no icon");
+    buf = malloc((size_t)st.st_size);
+    if (!buf) return queue_text(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, "oom");
+    if (pread(fd, buf, (size_t)st.st_size, 0) != st.st_size) {
+        free(buf);
+        return queue_text(conn, MHD_HTTP_NOT_FOUND, "no icon");
+    }
+
+    resp = MHD_create_response_from_buffer((size_t)st.st_size, buf,
+                                           MHD_RESPMEM_MUST_FREE);
+    if (!resp) { free(buf); return MHD_NO; }
+    MHD_add_response_header(resp, MHD_HTTP_HEADER_CONTENT_TYPE, "image/png");
+    MHD_add_response_header(resp, MHD_HTTP_HEADER_CACHE_CONTROL, "max-age=86400");
+    ret = MHD_queue_response(conn, MHD_HTTP_OK, resp);
+    MHD_destroy_response(resp);
+    return ret;
+}
+
 static enum MHD_Result
 queue_asset(struct MHD_Connection *conn, const char *url) {
     const patchdl_asset_t *asset = patchdl_asset_find(url);
@@ -781,6 +819,7 @@ build_titles_json(void) {
             jbuf_append_ver_or_null(&j, t->latest_required_fw);
         jbuf_append(&j, ",\"source_type\":");
             jbuf_append_str(&j, patchdl_source_str(t->source_type));
+        jbuf_append(&j, t->icon_fd >= 0 ? ",\"has_icon\":true" : ",\"has_icon\":false");
         jbuf_append(&j, ",\"pkg_sign\":");
             jbuf_append_str(&j, t->pkg_sign == PATCHDL_PKG_RETAIL ? "retail"
                               : t->pkg_sign == PATCHDL_PKG_FAKE   ? "fake"
@@ -2095,6 +2134,12 @@ on_request(void *cls, struct MHD_Connection *conn, const char *url,
 
     if (!strcmp(url, "/api/titles"))
         return queue_json_owned(conn, MHD_HTTP_OK, build_titles_json());
+
+    if (!strncmp(url, "/api/icon/", 10)) {
+        if (!path_segment_safe(url + 10))
+            return queue_text(conn, MHD_HTTP_FORBIDDEN, "forbidden");
+        return queue_icon(conn, url + 10);
+    }
 
     if (!strcmp(url, "/api/downloads"))
         return queue_json_owned(conn, MHD_HTTP_OK, build_downloads_json());

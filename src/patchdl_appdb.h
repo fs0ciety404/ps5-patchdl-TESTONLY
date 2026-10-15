@@ -17,6 +17,7 @@ typedef struct {
     char content_id[64];
     char content_version[16];
     char version_file_uri[256]; /* Sony version.xml URL (UUID assigned) */
+    char icon_path[256];        /* icon0Info without its "?ts=" suffix, or "" */
 } patchdl_appinfo_t;
 
 /* Read the PS5 app database (tbl_contentinfo) for installed-title metadata.

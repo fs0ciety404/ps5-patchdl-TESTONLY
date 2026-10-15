@@ -7,6 +7,9 @@ const API = {
   action: (titleId, action) => `/api/titles/${encodeURIComponent(titleId)}/${action}`,
 };
 
+// title_id -> loaded <img>, so re-rendered cards show icons instantly.
+const iconCache = new Map();
+
 const SOURCE_TYPES = {
   official:    { label: "Official",    className: "ok",       installAllowed: true,  description: "Native console installation" },
   external:    { label: "External",    className: "external", installAllowed: true,  description: "Real external installation" },
@@ -376,6 +379,20 @@ function createGameCard(game) {
   const cover = document.createElement("div");
   cover.className = "cover";
   cover.textContent = initials(game.name);
+  if (game.has_icon) {
+    // Cards re-render on every poll. Reuse an icon that already loaded so
+    // it doesn't flash back to the initials; a failed icon keeps them.
+    const loaded = iconCache.get(game.title_id);
+    if (loaded) {
+      cover.replaceChildren(loaded.cloneNode());
+    } else {
+      const img = new Image();
+      img.alt = "";
+      img.decoding = "async";
+      img.onload = () => { iconCache.set(game.title_id, img); cover.replaceChildren(img.cloneNode()); };
+      img.src = `/api/icon/${encodeURIComponent(game.title_id)}`;
+    }
+  }
   lead.appendChild(cover);
   if (sourcePolicy(game).allow_install) lead.appendChild(buildToggle(game));
 
@@ -398,7 +415,7 @@ function createGameCard(game) {
     <div class="versions">
       <span>Installed <b>${escapeHtml(game.installed_version || "--")}</b></span>
       <span>Compatible <b>${escapeHtml(game.compatible_version || "None")}</b></span>
-      <span>Latest <b>${escapeHtml(game.latest_version || "--")}</b>${game.latest_required_fw ? ` · FW ${escapeHtml(game.latest_required_fw)}` : ""}</span>
+      <span>Latest <b>${escapeHtml(game.latest_version || "--")}</b>${game.latest_required_fw ? ` · needs FW ${escapeHtml(game.latest_required_fw)}` : ""}</span>
     </div>
   `;
 

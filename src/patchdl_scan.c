@@ -13,6 +13,7 @@
 #include <ps5/kernel.h>
 
 #include <dirent.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -314,6 +315,7 @@ scan_one(const char *base, const char *name, patchdl_title_t *t,
 
     snprintf(dir, sizeof(dir), "%s/%s", base, name);
     memset(t, 0, sizeof(*t));
+    t->icon_fd = -1;
     strncpy(t->source_path, dir, sizeof(t->source_path) - 1);
     strncpy(t->title_id, name, sizeof(t->title_id) - 1);
 
@@ -408,6 +410,50 @@ patchdl_source_str(patchdl_source_t src) {
     }
 }
 
+/* Open a title's icon0.png while the scan still sees the whole filesystem.
+   The web server can't reach these paths later, but an fd opened now stays
+   readable. Tries the app.db path first, then the usual install locations.
+   Returns an fd to a non-empty PNG of sane size, or -1. */
+#define ICON_MAX_BYTES (4 * 1024 * 1024)
+
+static int
+open_png(const char *path) {
+    unsigned char magic[8];
+    struct stat   st;
+    int           fd;
+
+    if (!path || path[0] != '/') return -1;
+    fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    if (fstat(fd, &st) || !S_ISREG(st.st_mode) ||
+        st.st_size < 8 || st.st_size > ICON_MAX_BYTES ||
+        pread(fd, magic, 8, 0) != 8 ||
+        memcmp(magic, "\x89PNG\r\n\x1a\n", 8)) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static int
+open_icon(const patchdl_title_t *t, const char *db_path) {
+    static const char *const candidates[] = {
+        "/user/appmeta/%s/icon0.png",
+        "/user/appmeta/external/%s/icon0.png",
+        "%s/sce_sys/icon0.png",            /* source_path, e.g. a shadowmount */
+        NULL,
+    };
+    char path[PATH_MAX];
+    int  fd = open_png(db_path);
+
+    for (int i = 0; fd < 0 && candidates[i]; i++) {
+        snprintf(path, sizeof(path), candidates[i],
+                 i < 2 ? t->title_id : t->source_path);
+        fd = open_png(path);
+    }
+    return fd;
+}
+
 /* Overlay app.db metadata (real title name, installed version, version.xml
    URL) onto the scanned titles. Genuine installs have no readable param.json,
    so this is the only source of their name/version. */
@@ -433,6 +479,11 @@ merge_appdb(patchdl_title_t *arr, size_t cnt) {
         if (a->version_file_uri[0])
             strncpy(arr[i].version_file_uri, a->version_file_uri,
                     sizeof(arr[i].version_file_uri) - 1);
+    }
+
+    for (size_t i = 0; i < cnt; i++) {
+        const patchdl_appinfo_t *a = patchdl_appdb_find(info, n, arr[i].title_id);
+        arr[i].icon_fd = open_icon(&arr[i], a ? a->icon_path : NULL);
     }
 
     patchdl_appdb_free(info);
@@ -499,7 +550,9 @@ patchdl_scan(patchdl_title_t **titles_out, size_t *count_out) {
 
 void
 patchdl_scan_free(patchdl_title_t *titles, size_t count) {
-    (void)count;
+    for (size_t i = 0; titles && i < count; i++)
+        if (titles[i].icon_fd >= 0)
+            close(titles[i].icon_fd);
     free(titles);
 }
 
