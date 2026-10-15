@@ -726,11 +726,22 @@ title_status_str(const patchdl_title_t *t) {
         /* Versions are zero-padded (01.000.011), so strcmp orders them.
            A compatible patch newer than what's installed = update available. */
         if (t->installed_version[0] &&
-            strcmp(t->compatible_version, t->installed_version) <= 0)
+            strcmp(t->compatible_version, t->installed_version) <= 0) {
+            /* Nothing installable, but a newer patch exists that needs a
+               newer firmware: say so instead of claiming up to date. */
+            if (t->latest_version[0] &&
+                strcmp(t->latest_version, t->installed_version) > 0)
+                return "incompatible_fw";
             return "up_to_date";
+        }
         return "available";
     }
-    if (t->latest_version[0]) return "incompatible_fw";
+    if (t->latest_version[0]) {
+        if (t->installed_version[0] &&
+            strcmp(t->latest_version, t->installed_version) <= 0)
+            return "up_to_date";
+        return "incompatible_fw";
+    }
     return "no_update";
 }
 

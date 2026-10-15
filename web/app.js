@@ -202,7 +202,8 @@ async function loadInitialData() {
   const prev = new Map(state.titles.map((g) => [g.title_id, g]));
   titles.forEach((g) => {
     const old = prev.get(g.title_id);
-    if (old && g.status !== "up_to_date") {
+    // Neither state has a patch left to fetch, so drop stale job flags.
+    if (old && g.status !== "up_to_date" && g.status !== "incompatible_fw") {
       if (old.downloaded) g.downloaded = true;
       if (old.installing) g.installing = true;
       if (old._autoInstalled) g._autoInstalled = true;
