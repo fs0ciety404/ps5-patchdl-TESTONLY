@@ -37,7 +37,7 @@ const fallback = {
       external: { allow_check: true, allow_download: true, allow_install: true },
       shadowmount: { allow_check: true, allow_download: true, allow_install: false },
       unknown: { allow_check: true, allow_download: false, allow_install: false },
-      fake: { allow_check: false, allow_download: false, allow_install: false },
+      fake: { allow_check: true, allow_download: false, allow_install: false },
     },
     cdn_allowlist: [
       "sgst.prod.dl.playstation.net",

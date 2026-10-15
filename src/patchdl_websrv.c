@@ -137,7 +137,7 @@ static const char config_tail_json[] =
   "\"external\":{\"allow_check\":true,\"allow_download\":true,\"allow_install\":true},"
   "\"shadowmount\":{\"allow_check\":true,\"allow_download\":true,\"allow_install\":false},"
   "\"unknown\":{\"allow_check\":true,\"allow_download\":false,\"allow_install\":false},"
-  "\"fake\":{\"allow_check\":false,\"allow_download\":false,\"allow_install\":false}"
+  "\"fake\":{\"allow_check\":true,\"allow_download\":false,\"allow_install\":false}"
   "},"
   "\"cdn_allowlist\":["
   "\"sgst.prod.dl.playstation.net\","
@@ -918,14 +918,6 @@ verxml_fetch_thread(void *arg) {
         if (g_verxml_stop) break;   /* shutdown: stop before the next blocking query */
         memset(&info, 0, sizeof(info));
 
-        /* Fake packages get no update check at all: PatchDL never offers an
-           official patch for them, so there is nothing to ask Sony about. */
-        if (t->source_type == PATCHDL_SOURCE_FAKE) {
-            pthread_mutex_lock(&g_mutex);
-            t->verxml_done = 1;
-            pthread_mutex_unlock(&g_mutex);
-            continue;
-        }
 
         /* The version.xml URL comes straight from the app.db (UUID included);
            fall back to the resolver only if the app.db had no entry. */
