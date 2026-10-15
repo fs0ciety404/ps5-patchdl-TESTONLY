@@ -263,13 +263,16 @@ pkg_sign_state(const char *dir) {
     return PATCHDL_PKG_UNREAD;
 }
 
-/* Keep only actual games. Skip PS5 system apps (NPXS), the Payload Manager
-   fake app (PLDM) and ELF-loader homebrew (PSPS). */
+/* Keep only actual games: PS5 (PPSA) and PS4 (CUSA) title ids followed by
+   five digits. System apps (NPXS) and homebrew with made-up ids (PatchDL's
+   own tile PTDL00001, loaders, file managers) have no Sony updates. */
 static int
 is_game_title(const char *title_id) {
-    if (!strncmp(title_id, "NPXS", 4)) return 0;
-    if (!strncmp(title_id, "PLDM", 4)) return 0;
-    if (!strncmp(title_id, "PSPS", 4)) return 0;
+    if (strncmp(title_id, "PPSA", 4) && strncmp(title_id, "CUSA", 4))
+        return 0;
+    for (int i = 4; i < 9; i++)
+        if (title_id[i] < '0' || title_id[i] > '9')
+            return 0;
     return 1;
 }
 
@@ -299,7 +302,8 @@ mount_is_shadow(const char *title_id, const struct statfs *mounts, int nmounts) 
  *   - app.pkg (no shadow mount) -> its header decides: Sony-signed is a
  *     genuine install (store or disc), debug/fake-signed is a fake package
  *     (listed, but never checked, downloaded or patched), unreadable is unknown
- *   - app.json with "fake":true -> homebrew fake (skip)
+ *   - app.json with "fake":true -> fake package if it has an app.pkg,
+ *     otherwise homebrew (skip)
  */
 static int
 scan_one(const char *base, const char *name, patchdl_title_t *t,
@@ -326,7 +330,9 @@ scan_one(const char *base, const char *name, patchdl_title_t *t,
         if (strstr(appjson, "\"fake\"") && strstr(appjson, "true"))
             is_fake = 1;
     }
-    if (is_fake)
+    /* "fake": true marks both homebrew and installed fake packages. Only
+       homebrew (no app.pkg) drops out; a fake package stays in the list. */
+    if (is_fake && !has_app_pkg)
         return -1;
 
     /* app.pkg is the on-disk package of a genuine install; ShadowMountPlus
@@ -337,8 +343,11 @@ scan_one(const char *base, const char *name, patchdl_title_t *t,
         /* app.json piece URLs are no signal: disc and store installs carry
            CDN URLs there too. The package header is. */
         t->pkg_sign = pkg_sign_state(dir);
-        t->source_type = t->pkg_sign == PATCHDL_PKG_RETAIL ? PATCHDL_SOURCE_OFFICIAL
-                       : t->pkg_sign == PATCHDL_PKG_FAKE   ? PATCHDL_SOURCE_FAKE
+        /* The installer's own fake marker wins over the header: block when
+           either says fake. */
+        t->source_type = (is_fake || t->pkg_sign == PATCHDL_PKG_FAKE)
+                                                   ? PATCHDL_SOURCE_FAKE
+                       : t->pkg_sign == PATCHDL_PKG_RETAIL ? PATCHDL_SOURCE_OFFICIAL
                                                            : PATCHDL_SOURCE_UNKNOWN;
     } else if (is_shadow || has_mountlnk || has_paramjson ||
                path_exists(dir, "sce_sys/param.sfo")) {

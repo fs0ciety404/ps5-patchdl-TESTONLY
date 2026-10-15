@@ -311,7 +311,8 @@ function renderSettings() {
 
 function renderGames() {
   renderGlobalStatus();
-  const visible = state.titles.filter(matchesFilter).filter(matchesQuery);
+  const visible = state.titles.filter(matchesFilter).filter(matchesQuery)
+    .sort((a, b) => (a.name || a.title_id).localeCompare(b.name || b.title_id, undefined, { sensitivity: "base", numeric: true }));
   els.gameGrid.replaceChildren();
 
   if (!visible.length) {
@@ -335,7 +336,13 @@ function gameCategory(game) {
   // Updatable rather than letting it fall out of every specific filter.
   if (game.status === "checking") return "updatable";
   if (game.patch_title_match === false) return "blocked";
-  if (game.status === "available" && isDownloadAllowed(game)) return "updatable";
+  // Updatable means PatchDL can install it. Download-only titles (shadowmounts,
+  // shared-master patches) count as "can't update" unless a download of
+  // theirs is already running or paused.
+  if (game.status === "available" && isInstallAllowed(game)) return "updatable";
+  if (game.status === "available" && isDownloadAllowed(game) &&
+      (game.downloading || game.resumable)) return "updatable";
+  if (game.status === "available") return "blocked";
   if (!sourcePolicy(game).allow_install && !sourcePolicy(game).allow_download) return "blocked";
   if (game.status === "incompatible_fw") return "needsfw";
   return "uptodate";
@@ -498,6 +505,8 @@ function statusPill(game) {
   if (game.status === "checking") return `<span class="pill">Checking…</span>`;
   if (sourceType(game) === "fake") return `<span class="pill">Not supported</span>`;
   if (game.patch_title_match === false) return `<span class="pill blocked">Title mismatch</span>`;
+  if (game.status === "available" && !isInstallAllowed(game))
+    return `<span class="pill warn">Update · download only</span>`;
   if (game.status === "available") return `<span class="pill ok">Update available</span>`;
   if (game.status === "incompatible_fw") return `<span class="pill warn">Needs FW ${escapeHtml(game.latest_required_fw || "")}</span>`;
   if (game.status === "up_to_date") return `<span class="pill">Up to date</span>`;
