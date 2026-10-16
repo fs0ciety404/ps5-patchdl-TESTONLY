@@ -25,6 +25,12 @@
   </a>
 </p>
 
+<p align="center">
+  If you like what I do, you can buy me a coffee*:
+  <a href="https://paypal.me/oliverkoester"><img src="https://img.shields.io/badge/Donate-PayPal-22c55e?style=flat-square&logo=paypal&logoColor=white" alt="Donate via PayPal"></a><br>
+  <sub>*It doesn't have to be a generous donation. A few cents are enough to show me who is interested in further development. So the motivation stays and I just know that I am not programming for the bin ;)</sub>
+</p>
+
 ---
 
 ## Highlights
@@ -132,6 +138,12 @@ PS5_HOST=<console-ip> scripts/deploy_ps5.sh
 ## Credits
 
 PatchDL is written in C and builds on [libmicrohttpd](https://www.gnu.org/software/libmicrohttpd/), [libcurl](https://curl.se/), [OpenSSL](https://www.openssl.org/), [SQLite](https://sqlite.org/) and the [ps5-payload-dev SDK](https://github.com/ps5-payload-dev/sdk). The version history behind older patches comes from [Prospero Patches](https://prosperopatches.com/). Thanks to everyone behind them.
+
+## Support
+
+If you like what I do, you can buy me a coffee*: [![Donate](https://img.shields.io/badge/Donate-PayPal-22c55e?style=flat-square&logo=paypal&logoColor=white)](https://paypal.me/oliverkoester)
+
+<sub>*It doesn't have to be a generous donation. A few cents are enough to show me who is interested in further development. So the motivation stays and I just know that I am not programming for the bin ;)</sub>
 
 ## License
 
