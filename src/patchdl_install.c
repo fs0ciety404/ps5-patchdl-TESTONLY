@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 
@@ -48,6 +49,12 @@ typedef struct {
     const char *content_id;
     const char *content_name;
     const char *icon_url;
+    /* Sony reads past the six pointers. The 8 bytes after icon_url select the
+       install mode: 0 = plain install, other values take a patch/cancel path
+       that refuses with 0x80B2116F. Left as stack garbage they caused our
+       intermittent 0x80B2116F (measured by ps5upload on FW 13.60). */
+    uint64_t    unknown_30;
+    uint64_t    reserved[7];
 } ai_meta_info_t;
 
 typedef struct {
@@ -87,7 +94,7 @@ typedef struct {
 
 #define STATIC_ASSERT(c, n) typedef char static_assert_##n[(c) ? 1 : -1]
 STATIC_ASSERT(sizeof(ai_pkg_info_t) == 0x38, pkg_info_size);
-STATIC_ASSERT(sizeof(ai_meta_info_t) == (6 * sizeof(void *)), meta_info_size);
+STATIC_ASSERT(sizeof(ai_meta_info_t) == 0x70, meta_info_size);
 STATIC_ASSERT(sizeof(ai_playgo_info_t) == 0x2700, playgo_info_size);
 STATIC_ASSERT(offsetof(ai_meta_info_t, uri) == 0, meta_uri_offset);
 STATIC_ASSERT(offsetof(ai_meta_info_t, icon_url) == (5 * sizeof(void *)),
@@ -359,6 +366,16 @@ backend_start(void) {
     pthread_mutex_unlock(&g_mtx);
 }
 
+/* Start the backend if needed and give it up to 15 s to come up (it loads a
+   system module and resolves symbols in its own thread), so an install
+   request right after startup doesn't fail just because it was early. */
+static void
+backend_wait(void) {
+    backend_start();
+    for (int i = 0; i < 150 && g_stage > 0 && g_stage != 5; i++)
+        usleep(100 * 1000);
+}
+
 static const char *
 stage_str(int s) {
     switch (s) {
@@ -428,7 +445,7 @@ patchdl_install_pkg_meta(const char *local_path, char *content_id, size_t cid_sz
         snprintf(msg, msg_sz, "package not on disk");
         return -1;
     }
-    backend_start();
+    backend_wait();
     if (g_stage != 5) {
         snprintf(msg, msg_sz, "install backend not ready: %s", stage_str(g_stage));
         return -1;
@@ -576,7 +593,7 @@ patchdl_install_local_pkg(const char *local_path, const char *expected_title_id,
     char        sdk_path[1024];
     char        pkg_tid[48] = {0};
     struct stat st;
-    int         rc;
+    int         rc = -1;
     int         pkg_tid_mismatch = 0;
 
     if (!local_path || !local_path[0]) {
@@ -588,7 +605,7 @@ patchdl_install_local_pkg(const char *local_path, const char *expected_title_id,
         return -1;
     }
 
-    backend_start();
+    backend_wait();
     if (g_stage != 5) {
         snprintf(msg, msg_sz, "install backend not ready: %s", stage_str(g_stage));
         return -1;
@@ -681,23 +698,23 @@ patchdl_install_local_pkg(const char *local_path, const char *expected_title_id,
                 }
             }
         }
-        uris[0]                 = sdk_path;      /* /user/data/... — the allowlisted path */
-        uris[1]                 = file_uri;       /* file:///user/data/... */
-        uris[2]                 = http_loop_uri[0] ? http_loop_uri : NULL;
-        uris[3]                 = http_lan_uri[0] ? http_lan_uri : NULL;
+        /* Stream install first: Sony's installer pulls the package from our
+           own /api/pkg over HTTP (ranges), the route that writes the content.
+           The bare path forms come last. */
+        uris[0]                 = http_loop_uri[0] ? http_loop_uri : NULL;
+        uris[1]                 = http_lan_uri[0] ? http_lan_uri : NULL;
+        uris[2]                 = sdk_path;      /* /user/data/... */
+        uris[3]                 = file_uri;       /* file:///user/data/... */
         meta.ex_uri             = "";
         meta.playgo_scenario_id = "";
-        /* For cross-region shared-master packages pass the installed game's
-           content_id so AppInstUtil binds the download to the right title. */
-        meta.content_id         = (pkg_tid_mismatch &&
-                                    target_content_id && target_content_id[0])
-                                   ? target_content_id : "";
+        /* Empty: the installer takes the id from the package itself. */
+        meta.content_id         = "";
         meta.content_name       = "PatchDL";
         meta.icon_url           = "";
 
         {
             char        tries[260] = {0};
-            const char *labels[4]  = { "userdata", "file", "loop", "lan" };
+            const char *labels[4]  = { "loop", "lan", "userdata", "file" };
             for (int i = 0; i < 4; i++) {
                 if (!uris[i]) continue;
                 memset(&pkg, 0, sizeof(pkg));
@@ -724,44 +741,11 @@ patchdl_install_local_pkg(const char *local_path, const char *expected_title_id,
         free(playgo);
     }
 
-    /* AppInstallPkg: simpler API, no MetaInfo content_id override. Tried for
-       all packages including cross-region, since it may have different
-       privilege requirements than InstallByPackage. For shared-master packages
-       it will bind to the pkg's own embedded title, not the expected_title_id,
-       so treat success with caution; also report the complete error set. */
-    {
-        char          ibp_tries[260] = {0};
-        ai_pkg_info_t pkg = {0};
-        int rc2;
-
-        /* stash the InstallByPackage diagnostic if available */
-        if (pkg_tid_mismatch)
-            snprintf(ibp_tries, sizeof(ibp_tries),
-                     "ibp=0x%08x(pkg %.12s->%.12s)",
-                     (unsigned)rc, pkg_tid,
-                     expected_title_id ? expected_title_id : "");
-
-        rc2 = ai_install_pkg(sdk_path, &pkg);
-        if (rc2 == 0) {
-            remember_install(expected_title_id, "AppInstallPkg",
-                             &pkg, target_content_id, rc2);
-            snprintf(msg, msg_sz, "install started (AppInstallPkg, content %.47s%s%s)",
-                     pkg.content_id[0] ? pkg.content_id :
-                     (target_content_id ? target_content_id : ""),
-                     ibp_tries[0] ? " " : "", ibp_tries);
-            return 0;
-        }
-        if (pkg_tid_mismatch)
-            snprintf(msg, msg_sz,
-                     "install rejected (pkg %.12s->%.12s ibp=0x%08x aip=0x%08x)",
-                     pkg_tid, expected_title_id ? expected_title_id : "",
-                     (unsigned)rc, (unsigned)rc2);
-        else
-            snprintf(msg, msg_sz,
-                     "install rejected (InstallByPackage=0x%08x, AppInstallPkg=0x%08x)",
-                     (unsigned)rc, (unsigned)rc2);
-        return rc2 ? rc2 : (rc ? rc : -1);
-    }
+    /* No AppInstallPkg fallback: it returns 0 and writes only the app
+       metadata (version, tile) without installing any content, which shows
+       up as "updated" while the game still runs the old version. */
+    snprintf(msg, msg_sz, "install rejected (InstallByPackage=0x%08x)", (unsigned)rc);
+    return rc ? rc : -1;
 }
 
 int
@@ -777,7 +761,7 @@ patchdl_install_by_uri(const char *uri, const char *target_title_id,
         snprintf(msg, msg_sz, "no uri");
         return -1;
     }
-    backend_start();
+    backend_wait();
     if (g_stage != 5) {
         snprintf(msg, msg_sz, "install backend not ready: %s", stage_str(g_stage));
         return -1;
@@ -821,7 +805,7 @@ patchdl_install_app_pkg(const char *local_path,
     if (!local_path || !local_path[0]) { snprintf(msg, msg_sz, "no path"); return -1; }
     if (stat(local_path, &st) != 0)    { snprintf(msg, msg_sz, "package not downloaded"); return -1; }
 
-    backend_start();
+    backend_wait();
     if (g_stage != 5) {
         snprintf(msg, msg_sz, "install backend not ready: %s", stage_str(g_stage));
         return -1;
