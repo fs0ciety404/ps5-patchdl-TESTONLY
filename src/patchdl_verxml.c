@@ -134,20 +134,26 @@ parse_packages(const char *xml, uint32_t fw_bin, patchdl_verinfo_t *out) {
         char murl[512] = {0};
 
         /* PS5 version.xml uses content_ver; PS4 uses version. */
-        if (attr_val(p, tag_end, "content_ver", ver, sizeof(ver)))
+        int is_ps4 = attr_val(p, tag_end, "content_ver", ver, sizeof(ver)) != 0;
+        if (is_ps4)
             attr_val(p, tag_end, "version", ver, sizeof(ver));
         attr_val(p, tag_end, "system_ver", sver, sizeof(sver));
         attr_val(p, tag_end, "delta_url", durl, sizeof(durl));
         attr_val(p, tag_end, "manifest_url", murl, sizeof(murl));
 
-        if (ver[0] && sver[0]) {
-            uint32_t pkg_sver = parse_hex(sver);
+        if (ver[0] && (sver[0] || is_ps4)) {
+            /* A PS4 patch's system_ver is a PS4 firmware (in decimal); the
+               PS5 runs PS4 games regardless, so it never blocks one. */
+            uint32_t pkg_sver = is_ps4 ? 0 : parse_hex(sver);
 
             /* Track latest overall */
             if (!out->latest_version[0] || ver_gt(ver, out->latest_version)) {
                 strncpy(out->latest_version, ver, sizeof(out->latest_version) - 1);
-                fw_bin_to_str(pkg_sver, out->latest_required_fw,
-                              sizeof(out->latest_required_fw));
+                if (is_ps4)
+                    out->latest_required_fw[0] = '\0';
+                else
+                    fw_bin_to_str(pkg_sver, out->latest_required_fw,
+                                  sizeof(out->latest_required_fw));
             }
 
             /* Track latest compatible + its installable patch source. PS5

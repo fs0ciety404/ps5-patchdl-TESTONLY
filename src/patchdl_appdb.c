@@ -164,6 +164,11 @@ load_db(const char *uri, patchdl_appinfo_t **out, size_t *count) {
         if (json) {
             json_str(json, "CONTENT_VERSION", e->content_version,
                      sizeof(e->content_version));
+            /* PS4 titles carry no CONTENT_VERSION; APP_VER is theirs, and
+               it includes an installed patch. */
+            if (!e->content_version[0])
+                json_str(json, "APP_VER", e->content_version,
+                         sizeof(e->content_version));
             json_str(json, "VERSION_FILE_URI", e->version_file_uri,
                      sizeof(e->version_file_uri));
         }

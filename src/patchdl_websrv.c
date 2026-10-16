@@ -145,8 +145,11 @@ stream_find(const char *title_id) {
    g_mutex held. */
 static int
 stream_read_all(const install_stream_t *st) {
+    int quiet = time(NULL) - st->last >= INSTALL_QUIET_SECS;
     return (st->total > 0 && st->read >= st->total) ||
-           (st->crc && time(NULL) - st->last >= INSTALL_QUIET_SECS);
+           (st->crc && quiet) ||
+           /* PS4 patches come without a .crc */
+           (!strncmp(st->title_id, "CUSA", 4) && st->read > 0 && quiet);
 }
 
 #define INSTALL_STALL_SECS 300
@@ -265,7 +268,8 @@ static const char config_tail_json[] =
   "\"cdn_allowlist\":["
   "\"sgst.prod.dl.playstation.net\","
   "\"gst.prod.dl.playstation.net\","
-  "\"gs2.ww.prod.dl.playstation.net\""
+  "\"gs2.ww.prod.dl.playstation.net\","
+  "\"gs-sec.ww.np.dl.playstation.net\""
   "]}";
 /* ---------- tiny JSON value lookups (flat objects only) ----------------- */
 
@@ -1104,9 +1108,6 @@ title_status_str(const patchdl_title_t *t) {
     if (t->source_type == PATCHDL_SOURCE_UNKNOWN ||
         t->source_type == PATCHDL_SOURCE_FAKE ||
         t->source_type == PATCHDL_SOURCE_SHADOWMOUNT) return "blocked";
-    /* PS4 games: their updates live on other Sony servers and install
-       another way. PatchDL only handles PS5 titles. */
-    if (!strncmp(t->title_id, "CUSA", 4))        return "blocked";
     if (t->compatible_version[0]) {
         /* Versions are zero-padded (01.000.011), so strcmp orders them.
            A compatible patch newer than what's installed = update available. */
@@ -1879,8 +1880,8 @@ verify_existing(dl_job_t *q, int fd, const patchdl_manifest_t *mf,
         pthread_mutex_unlock(&g_pool.mtx);
         if (stop) break;
         if (mf->pieces[i].hash[0] &&
-            patchdl_sha256_fd_region(fd, mf->pieces[i].offset, mf->pieces[i].size,
-                                     hex) == 0 &&
+            patchdl_hash_fd_region(fd, mf->pieces[i].offset, mf->pieces[i].size,
+                                   mf->pieces[i].hash, hex) == 0 &&
             !strcasecmp(hex, mf->pieces[i].hash))
             done[i / 8] |= (unsigned char)(1 << (i % 8));
         hashed += mf->pieces[i].size;
@@ -2206,9 +2207,6 @@ do_download(struct MHD_Connection *conn, const char *title_id,
     if (src == PATCHDL_SOURCE_SHADOWMOUNT)
         return queue_json(conn, MHD_HTTP_FORBIDDEN,
                           "{\"ok\":false,\"reason\":\"source_shadowmount\"}");
-    if (!strncmp(title_id, "CUSA", 4))
-        return queue_json(conn, MHD_HTTP_FORBIDDEN,
-                          "{\"ok\":false,\"reason\":\"ps4_not_supported\"}");
     if (!patch_url[0])
         return queue_json(conn, MHD_HTTP_CONFLICT,
                           "{\"ok\":false,\"reason\":\"no_compatible_patch\"}");
@@ -2546,9 +2544,7 @@ do_install(struct MHD_Connection *conn, const char *title_id,
     if (src != PATCHDL_SOURCE_OFFICIAL && src != PATCHDL_SOURCE_EXTERNAL)
         return queue_json(conn, MHD_HTTP_FORBIDDEN,
                           "{\"ok\":false,\"reason\":\"install_not_allowed_for_source\"}");
-    if (!strncmp(title_id, "CUSA", 4))
-        return queue_json(conn, MHD_HTTP_FORBIDDEN,
-                          "{\"ok\":false,\"reason\":\"ps4_not_supported\"}");
+
 
     if (!patch_url[0] && !delta_url[0])
         return queue_json(conn, MHD_HTTP_CONFLICT,
@@ -3325,8 +3321,8 @@ on_request(void *cls, struct MHD_Connection *conn, const char *url,
             char got[80] = {0};
             int  ok = 0;
             if (mf.pieces[i].hash[0] &&
-                patchdl_sha256_fd_region(fd, mf.pieces[i].offset,
-                                         mf.pieces[i].size, got) == 0)
+                patchdl_hash_fd_region(fd, mf.pieces[i].offset,
+                                       mf.pieces[i].size, mf.pieces[i].hash, got) == 0)
                 ok = (strcasecmp(got, mf.pieces[i].hash) == 0);
             if (ok) okc++; else { badc++; if (first_bad < 0) first_bad = i; }
             if (i) jbuf_append(&j, ",");
@@ -3556,8 +3552,12 @@ check_one_install(int idx) {
     idle = (long long)(time(NULL) - last);
     snprintf(size_key, sizeof size_key, "\"originalFileSize\":%lld", total);
     aj = malloc(256 * 1024);
+    /* A PS5 update replaces the game's app.pkg (app.json); a PS4 patch
+       lands next to it under /user/patch/<id>/ (patch.json). */
     ok = aj && version_installed(tid, ver) && file[0] &&
-         patchdl_scan_read_app_file(tid, "app.json", aj, 256 * 1024) == 0 &&
+         (strncmp(tid, "CUSA", 4)
+              ? patchdl_scan_read_app_file(tid, "app.json", aj, 256 * 1024)
+              : patchdl_scan_read_patch_file(tid, "patch.json", aj, 256 * 1024)) == 0 &&
          strstr(aj, file) && strstr(aj, size_key);
     free(aj);
     /* install_reading() would say busy: this install is the one being

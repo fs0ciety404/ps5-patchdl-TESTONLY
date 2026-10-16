@@ -638,15 +638,22 @@ patchdl_scan(patchdl_title_t **titles_out, size_t *count_out) {
     return rc;
 }
 
-int
-patchdl_scan_read_app_file(const char *title_id, const char *name,
-                           char *buf, size_t sz) {
+static const char *PATCH_DIRS[] = {
+    "/user/patch",
+    "/mnt/ext0/user/patch",
+    "/mnt/ext1/user/patch",
+    NULL,
+};
+
+static int
+read_title_file(const char *const *bases, const char *title_id, const char *name,
+                char *buf, size_t sz) {
     char path[PATH_MAX];
     if (g_sysroot_fd < 0 || !sz) return -1;
-    for (int i = 0; SCAN_DIRS[i]; i++) {
+    for (int i = 0; bases[i]; i++) {
         int     fd;
         ssize_t n;
-        snprintf(path, sizeof(path), "%s/%s/%s", SCAN_DIRS[i] + 1, title_id, name);
+        snprintf(path, sizeof(path), "%s/%s/%s", bases[i] + 1, title_id, name);
         fd = openat(g_sysroot_fd, path, O_RDONLY | O_CLOEXEC);
         if (fd < 0) continue;
         n = read(fd, buf, sz - 1);
@@ -656,6 +663,18 @@ patchdl_scan_read_app_file(const char *title_id, const char *name,
         return 0;
     }
     return -1;
+}
+
+int
+patchdl_scan_read_app_file(const char *title_id, const char *name,
+                           char *buf, size_t sz) {
+    return read_title_file(SCAN_DIRS, title_id, name, buf, sz);
+}
+
+int
+patchdl_scan_read_patch_file(const char *title_id, const char *name,
+                             char *buf, size_t sz) {
+    return read_title_file(PATCH_DIRS, title_id, name, buf, sz);
 }
 
 /* Fold one stat result into an FNV-1a hash. */

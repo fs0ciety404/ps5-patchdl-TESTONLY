@@ -43,7 +43,7 @@ typedef struct {
     char     *url;
     long long offset;     /* byte offset of this piece in the assembled file */
     long long size;       /* exact length of this piece */
-    char      hash[80];   /* manifest SHA-256 hex, or "" */
+    char      hash[80];   /* manifest hash hex (SHA-256, or SHA-1 for PS4), or "" */
 } patchdl_piece_t;
 
 typedef struct {
@@ -79,10 +79,11 @@ int patchdl_http_download_piece(const char *url, int fd,
                                 patchdl_piece_ctx_t *ctx,
                                 int *curl_rc_out, long *http_code_out);
 
-/* Read-only: SHA-256 a [offset, offset+size) region of fd into out_hex
-   (caller provides >= 65 bytes). Returns 0 on success. */
-int patchdl_sha256_fd_region(int fd, long long offset, long long size,
-                             char *out_hex);
+/* Read-only: hash a [offset, offset+size) region of fd into out_hex
+   (caller provides >= 65 bytes), SHA-1 if like_hex has 40 hex digits (PS4
+   manifests), else SHA-256. Returns 0 on success. */
+int patchdl_hash_fd_region(int fd, long long offset, long long size,
+                           const char *like_hex, char *out_hex);
 
 /* Progress callback. Return non-zero to ABORT the in-flight download (used to
    cancel large patch downloads); return 0 to continue. */

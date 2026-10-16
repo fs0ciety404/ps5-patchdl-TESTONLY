@@ -67,8 +67,15 @@ static const char *ALLOWED_HOSTS[] = {
     "sgst.prod.dl.playstation.net",
     "gst.prod.dl.playstation.net",
     "gs2.ww.prod.dl.playstation.net",
+    "gs-sec.ww.np.dl.playstation.net",   /* PS4 update lists */
     NULL,
 };
+
+/* PS4 package manifests are published on gs2 over plain http only (https
+   there is a CloudFront edge without Sony's certificate). The console's own
+   installer checks the package signature, so a forged manifest can't get an
+   unsigned package installed. Everything else stays https-only. */
+#define PLAIN_HTTP_HOST "gs2.ww.prod.dl.playstation.net"
 
 static int
 host_allowed(const char *host) {
@@ -88,6 +95,13 @@ host_allowed(const char *host) {
 }
 
 /* Extract hostname from https://host/path or http://host/path */
+/* Manifest piece hashes: PS5 manifests carry SHA-256 (64 hex digits), PS4
+   manifests SHA-1 (40). */
+static const EVP_MD *
+digest_for(const char *hex) {
+    return (hex && strlen(hex) == 40) ? EVP_sha1() : EVP_sha256();
+}
+
 static int
 url_host(const char *url, char *out, size_t out_sz) {
     const char *p = strstr(url, "://");
@@ -291,8 +305,11 @@ patchdl_http_get(const char *url, patchdl_buf_t *out) {
     struct curl_slist *resolve_list = NULL;
     struct curl_blob  ca_blob;
 
+    int plain = !strncmp(url, "http://", 7);
+
     if (url_host(url, host, sizeof(host))) return -1;
     if (!host_allowed(host)) return -1;
+    if (plain && strcasecmp(host, PLAIN_HTTP_HOST)) return -1;
     if (dns_lookup(host, ip, sizeof(ip))) return -1;
 
     snprintf(resolve_str, sizeof(resolve_str), "%s:443:%s", host, ip);
@@ -334,8 +351,9 @@ patchdl_http_get(const char *url, patchdl_buf_t *out) {
     curl_easy_setopt(curl, CURLOPT_MAXREDIRS,       3L);
     /* Redirects must stay on HTTPS — host_allowed gates the initial URL, but
        once libcurl follows a 302 we want the protocol pinned too. The _STR
-       variants replaced the bitfield options in libcurl 7.85. */
-    curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR,       "https");
+       variants replaced the bitfield options in libcurl 7.85. Plain http only
+       for the PS4 manifest host (see PLAIN_HTTP_HOST). */
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR,       plain ? "http" : "https");
     curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL,        1L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT,       "patchdl/1.0");
@@ -517,7 +535,7 @@ http_download_to_file_progress(const char *url, FILE *fp, long long *bytes_out,
     if (verify) {
         sink.md = EVP_MD_CTX_new();
         if (sink.md)
-            EVP_DigestInit_ex(sink.md, EVP_sha256(), NULL);
+            EVP_DigestInit_ex(sink.md, digest_for(expected_sha256_hex), NULL);
     }
 
     snprintf(rs443, sizeof(rs443), "%s:443:%s", host, ip);
@@ -944,7 +962,7 @@ patchdl_http_download_piece(const char *url, int fd,
     sink.bytes_slot = ctx ? ctx->bytes_slot : NULL;
     if (verify) {
         sink.md = EVP_MD_CTX_new();
-        if (sink.md) EVP_DigestInit_ex(sink.md, EVP_sha256(), NULL);
+        if (sink.md) EVP_DigestInit_ex(sink.md, digest_for(expected_sha256_or_null), NULL);
     }
 
     snprintf(rs443, sizeof(rs443), "%s:443:%s", host, ip);
@@ -1018,10 +1036,12 @@ patchdl_http_download_piece(const char *url, int fd,
     return 0;
 }
 
-/* Read-only: SHA-256 a [offset, offset+size) region of fd into out_hex (>=65
-   bytes). Uses pread so it doesn't disturb the fd offset. 0 on success. */
+/* Read-only: hash a [offset, offset+size) region of fd into out_hex (>=65
+   bytes), with the algorithm `like_hex` is written in (see digest_for). Uses
+   pread so it doesn't disturb the fd offset. 0 on success. */
 int
-patchdl_sha256_fd_region(int fd, long long offset, long long size, char *out_hex) {
+patchdl_hash_fd_region(int fd, long long offset, long long size,
+                       const char *like_hex, char *out_hex) {
     EVP_MD_CTX   *md;
     unsigned char *buf;
     long long      pos = offset, remaining = size;
@@ -1033,7 +1053,7 @@ patchdl_sha256_fd_region(int fd, long long offset, long long size, char *out_hex
     if (!md) return -1;
     buf = malloc(CHUNK);
     if (!buf) { EVP_MD_CTX_free(md); return -1; }
-    EVP_DigestInit_ex(md, EVP_sha256(), NULL);
+    EVP_DigestInit_ex(md, digest_for(like_hex), NULL);
     while (remaining > 0) {
         size_t  want = remaining > (long long)CHUNK ? CHUNK : (size_t)remaining;
         ssize_t got  = pread(fd, buf, want, (off_t)pos);

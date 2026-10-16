@@ -84,6 +84,9 @@ const char *patchdl_scan_step(void);
    0 on success with a NUL-terminated buf. */
 int patchdl_scan_read_app_file(const char *title_id, const char *name,
                                char *buf, size_t sz);
+/* Same for an installed PS4 patch: /user/patch/<id>/<name>. */
+int patchdl_scan_read_patch_file(const char *title_id, const char *name,
+                                 char *buf, size_t sz);
 
 /* Mark scan/debug as no longer safe to call (must be set after MHD worker
    threads come up — patchdl_scan performs a process-wide vnode swap that

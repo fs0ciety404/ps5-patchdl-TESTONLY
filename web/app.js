@@ -51,6 +51,7 @@ const fallback = {
       "sgst.prod.dl.playstation.net",
       "gst.prod.dl.playstation.net",
       "gs2.ww.prod.dl.playstation.net",
+      "gs-sec.ww.np.dl.playstation.net",
     ],
   },
   titles: [
@@ -252,9 +253,17 @@ async function loadInitialData({ quiet = false } = {}) {
   titles.forEach((g) => {
     const old = prev.get(g.title_id);
     // Neither state has a patch left to fetch, so drop stale job flags.
+    // An install ends when the install poll says so, not when the list
+    // already reports the new version (the console writes it mid-install).
+    if (old && old.installing) {
+      g.installing = true;
+      g.installStatus = old.installStatus;
+      g.installProgress = old.installProgress;
+      g.installDone = old.installDone;
+      g.installTotal = old.installTotal;
+    }
     if (old && g.status !== "up_to_date" &&
         (g.status !== "incompatible_fw" || g.manual_version)) {
-      if (old.installing) g.installing = true;
       if (old._autoInstalled) g._autoInstalled = true;
       if (old._localDownloading) g._localDownloading = true;
       if (old._wasActive) g._wasActive = true;
@@ -476,6 +485,7 @@ function createGameCard(game) {
       ${game.resumable && !game.downloading ? `<span class="pill warn">Paused</span>` : ""}
       ${statusPill(game)}
       ${sourcePill(game)}
+      ${isPs4(game) ? `<span class="pill">PS4</span>` : ""}
     </div>
     <div class="versions">${versionsHtml(game)}</div>
   `;
@@ -616,7 +626,6 @@ function versionsHtml(game) {
 function statusPill(game) {
   if (game.installing) return `<span class="pill warn">Installing…</span>`;
   if (game.status === "checking") return `<span class="pill">Checking…</span>`;
-  if (isPs4(game)) return `<span class="pill">PS4 · not supported</span>`;
   if (game.status === "blocked" || !sourcePolicy(game).allow_install)
     return `<span class="pill">Not supported</span>`;
   if (game.patch_title_match === false) return `<span class="pill blocked">Title mismatch</span>`;
@@ -1303,7 +1312,6 @@ const REASON_TEXT = {
   piece_verify_failed: "A downloaded piece failed its SHA-256 check.",
   install_running: "The console is installing from this package right now. Try again when it is done.",
   already_installed: "This version is already installed.",
-  ps4_not_supported: "PS4 games are not supported.",
   too_many_installs: "Too many installs running at once. Try again when one has finished.",
   download_incomplete: "The download is not complete yet.",
   download_unverified: "The package on disk hasn't been checked yet. Press Update: PatchDL verifies it and downloads only what's missing.",
