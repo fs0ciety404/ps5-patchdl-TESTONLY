@@ -28,15 +28,17 @@
 
 ## Highlights
 
-- **Your whole library at a glance.** Every installed game shows up with its icon, its version and the newest update Sony offers for it, sorted A to Z.
+- **Your whole library at a glance.** Every installed game shows up with its icon, its version and the newest update Sony offers for it, sorted A to Z. Install or remove a game and the list follows within seconds, no restart needed.
 - **Update all.** One click queues every game that has an update. PatchDL works through the queue and installs each update as soon as it lands.
 - **Fast downloads.** Up to 16 parallel connections per update. Change the number in Settings while a download runs.
 - **Survives reboots.** Pause, resume, or lose power: PatchDL saves progress after every finished piece and continues where it stopped.
 - **Made for your firmware.** You only see updates your console can run. When Sony's newest patch needs a newer firmware, PatchDL finds the newest one that still runs on yours and helps you get it: scan a QR code with your phone, copy one link, and the PS5 does the rest.
 - **Knows where each game came from.** PatchDL checks every game's package and recognizes disc and PlayStation Store installs. It only ever patches games Sony signed.
 - **Checked against Sony's checksums.** Turn on verification and PatchDL compares every piece with the SHA-256 Sony publishes for it.
+- **Reuses what's already there.** If the update package is already on the console, PatchDL checks it against Sony's checksums and downloads only the pieces that don't match.
+- **Keeps your storage tidy.** After an install, PatchDL confirms the game runs the new version and then deletes the package. Prefer to keep packages? Turn that off, and Settings lists every package on the console with its size and version, ready to delete.
 - **A tile on your home screen.** One toggle adds PatchDL to the PS5 home screen. Tap it and the UI opens in the console's browser.
-- **Live progress.** A banner at the top shows the current game, speed, time left and where you are in the queue.
+- **Live progress.** A banner at the top shows the current game, speed, time left and where you are in the queue. During an install, the game's card shows how much of the update the console has read.
 
 ## Screenshots
 
@@ -77,7 +79,7 @@ Start an update from the couch with your phone, check on it from your laptop, or
 No. It fetches updates for games that are already installed on your console. Nothing else.
 
 **Which games does PatchDL update?**
-Games you installed from disc or from the PlayStation Store. PatchDL reads each game's package before it offers anything, and it leaves every other title alone.
+PS5 games you installed from disc or from the PlayStation Store. PatchDL reads each game's package before it offers anything, and it leaves every other title alone. PS4 games are not supported.
 
 **Where do the updates come from?**
 From Sony's official update servers, the same files your console downloads on its own. PatchDL downloads only from a short list of PlayStation CDN hosts. To find older patches it also asks [Prospero Patches](https://prosperopatches.com/) which versions exist for a game. That lookup sends the game's title ID and nothing else.
@@ -87,6 +89,9 @@ Yes. Sony still hosts older patches, but its servers only tell your console abou
 
 **Does it change the updates?**
 No. Each package stays exactly as Sony published it, and the console's own installer applies it.
+
+**Does it delete the package after installing?**
+Only once the install is confirmed: the game reports the new version and the console's installer recorded this exact package. If either check fails, the package stays. Switch off **Delete PKG after install** in Settings to keep every package.
 
 **Will it touch my system software?**
 No. PatchDL never downloads system software, and it only offers game updates that run on the firmware you have.
