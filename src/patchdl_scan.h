@@ -59,6 +59,7 @@ typedef struct {
     char             manual_version[16];
     int              enabled;          /* user policy, persisted in config.json */
     int              resumable;        /* a partial download is on disk */
+    int              downloaded;       /* a finished download is on disk */
     long long        partial_bytes;    /* size of that partial, for the UI */
 } patchdl_title_t;
 
@@ -70,8 +71,24 @@ const char *patchdl_source_str(patchdl_source_t src);
    listings. Caller frees. */
 char       *patchdl_scan_debug_json(void);
 
+/* Cheap change check for the automatic rescan: a hash over the title
+   directories and Sony's app.db. 0 when it can't be computed (no system root
+   handle), so callers never rescan on it. */
+unsigned long long patchdl_scan_signature(void);
+
+/* Name of the step the running scan is in ("idle" when none). */
+const char *patchdl_scan_step(void);
+
+/* Read <title dir>/<name> of an installed title (e.g. app.json) through the
+   kept system root handle; thread-safe, no working-directory change.
+   0 on success with a NUL-terminated buf. */
+int patchdl_scan_read_app_file(const char *title_id, const char *name,
+                               char *buf, size_t sz);
+
 /* Mark scan/debug as no longer safe to call (must be set after MHD worker
    threads come up — patchdl_scan performs a process-wide vnode swap that
-   would race any concurrent thread). After this is set, both entry points
-   return immediately. Call once during startup, after MHD_start_daemon. */
+   would race any concurrent thread). After this is set, patchdl_scan rescans
+   through the system root handle kept by the first scan (working directory
+   only, one caller at a time) and the debug dump returns NULL. Call once
+   during startup, after MHD_start_daemon. */
 void        patchdl_scan_lock(void);

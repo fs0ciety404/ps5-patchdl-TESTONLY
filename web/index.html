@@ -169,7 +169,7 @@
               <label class="field">
                 <span>Download Folder</span>
                 <input id="downloadDir" type="text" spellcheck="false" readonly
-                       title="Patches always download internally and are removed after install" />
+                       title="Patches always download to the console's internal storage" />
               </label>
 
               <label class="switch-row">
@@ -233,6 +233,11 @@
             <div class="source-policy">
               <span>Install Protection</span>
               <div id="sourcePolicyList"></div>
+            </div>
+
+            <div class="storage-list">
+              <span>Downloads on console <em id="storageTotal"></em></span>
+              <div id="storageList"></div>
             </div>
           </div>
         </section>

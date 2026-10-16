@@ -9,13 +9,68 @@
 
 #include "patchdl_appdb.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define APP_DB_URI \
     "file:/system_data/priv/mms/app.db?immutable=1"
+/* A rescan can't open app.db by a relative path: SQLite turns it into an
+   absolute one with getcwd(), which resolves inside our own root again. So
+   it copies the file out through the working directory (the system root,
+   see patchdl_scan) and opens the copy. */
+#define APP_DB_REL      "system_data/priv/mms/app.db"
+#define APP_DB_SNAPSHOT "/data/patchdl/.appdb.snapshot"
+#define APP_DB_URI_SNAPSHOT "file:" APP_DB_SNAPSHOT "?immutable=1"
+
+static char g_appdb_err[64];
+
+const char *
+patchdl_appdb_error(void) {
+    return g_appdb_err;
+}
+
+static int
+snapshot_appdb(void) {
+    char   *buf;
+    ssize_t n;
+    int     in, out, rc = 0;
+
+    if ((in = open(APP_DB_REL, O_RDONLY | O_CLOEXEC)) < 0) {
+        snprintf(g_appdb_err, sizeof g_appdb_err, "open app.db errno %d", errno);
+        return -1;
+    }
+    out = open(APP_DB_SNAPSHOT, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (out < 0) {
+        snprintf(g_appdb_err, sizeof g_appdb_err, "open snapshot errno %d", errno);
+        close(in);
+        return -1;
+    }
+    if (!(buf = malloc(65536))) {
+        close(in);
+        close(out);
+        return -1;
+    }
+    while ((n = read(in, buf, 65536)) > 0)
+        if (write(out, buf, (size_t)n) != n) {
+            snprintf(g_appdb_err, sizeof g_appdb_err, "write snapshot errno %d", errno);
+            rc = -1;
+            break;
+        }
+    if (n < 0) {
+        snprintf(g_appdb_err, sizeof g_appdb_err, "read app.db errno %d", errno);
+        rc = -1;
+    }
+    free(buf);
+    close(in);
+    close(out);
+    if (rc) unlink(APP_DB_SNAPSHOT);
+    return rc;
+}
 
 #define APPDB_MAX 1024
 
@@ -60,8 +115,9 @@ json_str(const char *json, const char *key, char *out, size_t out_sz) {
         out[--len] = '\0';
 }
 
-int
-patchdl_appdb_load(patchdl_appinfo_t **out, size_t *count) {
+static int
+load_db(const char *uri, patchdl_appinfo_t **out, size_t *count) {
+    int           step = SQLITE_DONE;
     sqlite3      *db = NULL;
     sqlite3_stmt *stmt = NULL;
     patchdl_appinfo_t *arr;
@@ -73,7 +129,7 @@ patchdl_appdb_load(patchdl_appinfo_t **out, size_t *count) {
     /* FULLMUTEX: today only the startup thread calls this, but future code
        paths (a manual rescan triggered from the HTTP thread) would otherwise
        race the SQLite handle. Cost is one mutex per call. */
-    if (sqlite3_open_v2(APP_DB_URI, &db,
+    if (sqlite3_open_v2(uri, &db,
                         SQLITE_OPEN_READONLY | SQLITE_OPEN_URI |
                         SQLITE_OPEN_FULLMUTEX, NULL) != SQLITE_OK) {
         if (db) sqlite3_close(db);
@@ -94,7 +150,7 @@ patchdl_appdb_load(patchdl_appinfo_t **out, size_t *count) {
         return -1;
     }
 
-    while (sqlite3_step(stmt) == SQLITE_ROW && n < APPDB_MAX) {
+    while ((step = sqlite3_step(stmt)) == SQLITE_ROW && n < APPDB_MAX) {
         patchdl_appinfo_t *e = &arr[n];
         const char *tid  = (const char *)sqlite3_column_text(stmt, 0);
         const char *name = (const char *)sqlite3_column_text(stmt, 1);
@@ -113,8 +169,15 @@ patchdl_appdb_load(patchdl_appinfo_t **out, size_t *count) {
         }
         n++;
     }
-
     sqlite3_finalize(stmt);
+    /* Anything but the end of the table (or the row cap) means the read
+       broke off, e.g. on a copy taken while the console wrote the file:
+       report failure instead of a list that silently lacks titles. */
+    if (step != SQLITE_DONE && step != SQLITE_ROW) {
+        free(arr);
+        sqlite3_close(db);
+        return -1;
+    }
 
     /* Icon paths in a separate query: if a firmware lacks the icon0Info
        column, only the icons go missing, not the whole title list. */
@@ -139,6 +202,18 @@ patchdl_appdb_load(patchdl_appinfo_t **out, size_t *count) {
     *out = arr;
     *count = n;
     return 0;
+}
+
+int
+patchdl_appdb_load(patchdl_appinfo_t **out, size_t *count, int relative) {
+    int rc;
+    *out = NULL;
+    *count = 0;
+    if (!relative) return load_db(APP_DB_URI, out, count);
+    if (snapshot_appdb()) return -2;
+    rc = load_db(APP_DB_URI_SNAPSHOT, out, count);
+    unlink(APP_DB_SNAPSHOT);
+    return rc;
 }
 
 void

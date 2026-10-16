@@ -1132,6 +1132,8 @@ patchdl_fetch_manifest(const char *manifest_url, patchdl_manifest_t *out) {
         out->count = n;          /* keep current so manifest_free frees exactly n */
         p = obj_end ? obj_end + 1 : p + 5;
     }
+    json_string_after(buf.data, "playgoChunkCrcUrl", out->crc_url,
+                      sizeof(out->crc_url), NULL);
     free(buf.data);
     if (n == 0) { patchdl_manifest_free(out); return -1; }
     out->total = running;        /* authoritative assembled size */

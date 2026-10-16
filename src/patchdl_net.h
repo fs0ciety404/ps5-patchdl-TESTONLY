@@ -50,6 +50,7 @@ typedef struct {
     patchdl_piece_t *pieces;
     int              count;
     long long        total;   /* assembled file size = sum of piece sizes */
+    char             crc_url[768]; /* playgoChunkCrcUrl, or "" */
 } patchdl_manifest_t;
 
 /* Fetch + parse a Sony JSON manifest into a validated, contiguously-tiled

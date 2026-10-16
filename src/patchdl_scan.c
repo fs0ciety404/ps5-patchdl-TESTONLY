@@ -34,6 +34,26 @@ static const char *SCAN_DIRS[] = {
     NULL,
 };
 
+/* The first scan runs single-threaded with the process root swapped to the
+   system root and keeps a handle to that root. Later scans (other threads are
+   running, so the root must not move) change only the working directory to
+   it and drop the leading '/' of every path, see sys_path. Nothing else in
+   PatchDL opens relative paths. */
+static int g_sysroot_fd = -1;
+static int g_rel_paths;
+/* Step the running scan is in, for diagnosing slow rescans. */
+static const char *volatile g_scan_step = "idle";
+
+const char *
+patchdl_scan_step(void) {
+    return g_scan_step;
+}
+
+static const char *
+sys_path(const char *p) {
+    return (g_rel_paths && p[0] == '/') ? p + 1 : p;
+}
+
 /* ---------- param.json -------------------------------------------------- */
 
 static int
@@ -91,7 +111,7 @@ try_param_json(const char *dir, patchdl_title_t *t) {
     size_t n;
 
     snprintf(path, sizeof(path), "%s/sce_sys/param.json", dir);
-    fp = fopen(path, "r");
+    fp = fopen(sys_path(path), "r");
     if (!fp) return -1;
     n = fread(buf, 1, sizeof(buf) - 1, fp);
     fclose(fp);
@@ -190,7 +210,7 @@ try_param_sfo(const char *dir, patchdl_title_t *t) {
     struct stat st;
 
     snprintf(path, sizeof(path), "%s/sce_sys/param.sfo", dir);
-    fp = fopen(path, "rb");
+    fp = fopen(sys_path(path), "rb");
     if (!fp) return -1;
 
     if (fstat(fileno(fp), &st) || (size_t)st.st_size > sizeof(buf)) {
@@ -219,7 +239,7 @@ path_exists(const char *dir, const char *rel) {
     char p[PATH_MAX];
     struct stat st;
     snprintf(p, sizeof(p), "%s/%s", dir, rel);
-    return stat(p, &st) == 0;
+    return stat(sys_path(p), &st) == 0;
 }
 
 /* Read up to sz-1 bytes of dir/rel into buf (NUL-terminated). 0 on success. */
@@ -230,7 +250,7 @@ read_small_file(const char *dir, const char *rel, char *buf, size_t sz) {
     size_t n;
 
     snprintf(p, sizeof(p), "%s/%s", dir, rel);
-    fp = fopen(p, "rb");
+    fp = fopen(sys_path(p), "rb");
     if (!fp) return -1;
     n = fread(buf, 1, sz - 1, fp);
     fclose(fp);
@@ -251,7 +271,7 @@ pkg_sign_state(const char *dir) {
     size_t        n;
 
     snprintf(p, sizeof(p), "%s/app.pkg", dir);
-    fp = fopen(p, "rb");
+    fp = fopen(sys_path(p), "rb");
     if (!fp) return PATCHDL_PKG_UNREAD;
     n = fread(h, 1, sizeof(h), fp);
     fclose(fp);
@@ -303,8 +323,9 @@ mount_is_shadow(const char *title_id, const struct statfs *mounts, int nmounts) 
  *   - app.pkg (no shadow mount) -> its header decides: Sony-signed is a
  *     genuine install (store or disc), debug/fake-signed is a fake package
  *     (listed, but never checked, downloaded or patched), unreadable is unknown
- *   - app.json with "fake":true -> fake package if it has an app.pkg,
- *     otherwise homebrew (skip)
+ *   - app.json with "fake":true and no app.pkg -> homebrew (skip). With an
+ *     app.pkg the marker only says the package did not come from Sony's CDN
+ *     (PatchDL's own loopback install sets it too), so the header decides.
  */
 static int
 scan_one(const char *base, const char *name, patchdl_title_t *t,
@@ -345,12 +366,13 @@ scan_one(const char *base, const char *name, patchdl_title_t *t,
         /* app.json piece URLs are no signal: disc and store installs carry
            CDN URLs there too. The package header is. */
         t->pkg_sign = pkg_sign_state(dir);
-        /* The installer's own fake marker wins over the header: block when
-           either says fake. */
-        t->source_type = (is_fake || t->pkg_sign == PATCHDL_PKG_FAKE)
+        /* The header wins over the installer's fake marker: a retail package
+           installed from a local URL is marked fake but is still Sony's. The
+           marker only decides when the header can't be read. */
+        t->source_type = t->pkg_sign == PATCHDL_PKG_RETAIL ? PATCHDL_SOURCE_OFFICIAL
+                       : (is_fake || t->pkg_sign == PATCHDL_PKG_FAKE)
                                                    ? PATCHDL_SOURCE_FAKE
-                       : t->pkg_sign == PATCHDL_PKG_RETAIL ? PATCHDL_SOURCE_OFFICIAL
-                                                           : PATCHDL_SOURCE_UNKNOWN;
+                                                   : PATCHDL_SOURCE_UNKNOWN;
     } else if (is_shadow || has_mountlnk || has_paramjson ||
                path_exists(dir, "sce_sys/param.sfo")) {
         if (try_param_json(dir, t)) /* metadata from the mounted sce_sys */
@@ -382,7 +404,7 @@ scan_base(const char *base, patchdl_title_t *arr, size_t *cnt, size_t cap,
     DIR           *d;
     struct dirent *de;
 
-    d = opendir(base);
+    d = opendir(sys_path(base));
     if (!d) return;
 
     while ((de = readdir(d))) {
@@ -423,7 +445,7 @@ open_png(const char *path) {
     int           fd;
 
     if (!path || path[0] != '/') return -1;
-    fd = open(path, O_RDONLY | O_CLOEXEC);
+    fd = open(sys_path(path), O_RDONLY | O_CLOEXEC);
     if (fd < 0) return -1;
     if (fstat(fd, &st) || !S_ISREG(st.st_mode) ||
         st.st_size < 8 || st.st_size > ICON_MAX_BYTES ||
@@ -454,16 +476,41 @@ open_icon(const patchdl_title_t *t, const char *db_path) {
     return fd;
 }
 
+/* After an install the console rewrites /user/appmeta/<id>/param.json at
+   once, while app.db keeps the old CONTENT_VERSION until later (seen: until
+   the game was started). Take the newer of the two so a finished update
+   doesn't look pending. */
+static void
+newer_appmeta_version(patchdl_title_t *t) {
+    char path[PATH_MAX], buf[8192], ver[16] = {0};
+    FILE *fp;
+    size_t n;
+
+    snprintf(path, sizeof(path), "/user/appmeta/%s/param.json", t->title_id);
+    if (!(fp = fopen(sys_path(path), "r"))) return;
+    n = fread(buf, 1, sizeof(buf) - 1, fp);
+    fclose(fp);
+    buf[n] = '\0';
+    if (json_str(buf, "contentVersion", ver, sizeof(ver)) == 0 &&
+        strcmp(ver, t->installed_version) > 0)
+        snprintf(t->installed_version, sizeof(t->installed_version), "%s", ver);
+}
+
 /* Overlay app.db metadata (real title name, installed version, version.xml
    URL) onto the scanned titles. Genuine installs have no readable param.json,
    so this is the only source of their name/version. */
-static void
+static int
 merge_appdb(patchdl_title_t *arr, size_t cnt) {
     patchdl_appinfo_t *info = NULL;
     size_t n = 0;
 
-    if (patchdl_appdb_load(&info, &n))
-        return;
+    {
+        int rc = patchdl_appdb_load(&info, &n, g_rel_paths);
+        if (rc) {
+            g_scan_step = rc == -2 ? patchdl_appdb_error() : "fail: appdb read";
+            return -1;
+        }
+    }
 
     for (size_t i = 0; i < cnt; i++) {
         const patchdl_appinfo_t *a = patchdl_appdb_find(info, n, arr[i].title_id);
@@ -481,16 +528,21 @@ merge_appdb(patchdl_title_t *arr, size_t cnt) {
                     sizeof(arr[i].version_file_uri) - 1);
     }
 
+    g_scan_step = "icons";
     for (size_t i = 0; i < cnt; i++) {
         const patchdl_appinfo_t *a = patchdl_appdb_find(info, n, arr[i].title_id);
         arr[i].icon_fd = open_icon(&arr[i], a ? a->icon_path : NULL);
+        if (arr[i].pkg_sign != PATCHDL_PKG_NONE)
+            newer_appmeta_version(&arr[i]);
     }
 
     patchdl_appdb_free(info);
+    return 0;
 }
 
-/* See patchdl_scan_lock — both vnode-swap entry points return -1 / NULL once
-   this is set so a late rescan call can't race the running MHD threads. */
+/* See patchdl_scan_lock — once set, patchdl_scan no longer swaps the root
+   (it rescans via the kept system root handle) and the debug dump returns
+   NULL, so neither can race the running MHD threads. */
 static _Atomic int g_scan_locked = 0;
 
 void
@@ -498,30 +550,72 @@ patchdl_scan_lock(void) {
     atomic_store(&g_scan_locked, 1);
 }
 
-int
-patchdl_scan(patchdl_title_t **titles_out, size_t *count_out) {
+static int
+scan_all(patchdl_title_t **titles_out, size_t *count_out) {
     patchdl_title_t *arr;
     size_t cnt = 0;
-    pid_t pid = getpid();
-    intptr_t saved_root = 0, root_vnode;
-    int using_vswap = 0;
-
     struct statfs *mounts = NULL;
     int            nmounts;
 
-    if (atomic_load(&g_scan_locked)) return -1;
-
     arr = calloc(MAX_TITLES, sizeof(*arr));
-    if (!arr) return -1;
+    if (!arr) { g_scan_step = "fail: oom"; return -1; }
+
+    /* Global mount table for shadowmount detection. getmntinfo's buffer is
+       libc-managed — must NOT be freed. */
+    g_scan_step = "mounts";
+    nmounts = getmntinfo(&mounts, MNT_NOWAIT);
+    if (nmounts < 0) { nmounts = 0; mounts = NULL; }
+
+    for (int i = 0; SCAN_DIRS[i]; i++) {
+        g_scan_step = SCAN_DIRS[i];
+        scan_base(SCAN_DIRS[i], arr, &cnt, MAX_TITLES, mounts, nmounts);
+    }
+    g_scan_step = "appdb";
+
+    /* At startup a list without app.db data still beats none. A rescan
+       without it would wipe names and versions of a good list: fail instead
+       and keep the old one. */
+    if (merge_appdb(arr, cnt) && g_rel_paths) {
+        free(arr);
+        return -1;
+    }
+    g_scan_step = "idle";
+
+    *titles_out = arr;
+    *count_out  = cnt;
+    return 0;
+}
+
+/* A rescan while other threads run: resolve every path from the system root
+   kept by the first scan, without touching the process root. */
+static int
+rescan_relative(patchdl_title_t **titles_out, size_t *count_out) {
+    int cwd, rc;
+
+    if (g_sysroot_fd < 0) { g_scan_step = "fail: no system root handle"; return -1; }
+    cwd = open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (cwd < 0) { g_scan_step = "fail: open cwd"; return -1; }
+    if (fchdir(g_sysroot_fd)) { g_scan_step = "fail: fchdir"; close(cwd); return -1; }
+    g_rel_paths = 1;
+    rc = scan_all(titles_out, count_out);
+    g_rel_paths = 0;
+    (void)fchdir(cwd);   /* best effort: nothing else uses the cwd */
+    close(cwd);
+    return rc;
+}
+
+int
+patchdl_scan(patchdl_title_t **titles_out, size_t *count_out) {
+    pid_t pid = getpid();
+    intptr_t saved_root = 0, root_vnode;
+    int using_vswap = 0, rc;
 
     /* Elevate so privileged paths (the app.db under /system_data) are
        readable; same authid ftpsrv uses. No-op without kernel R/W. */
     kernel_set_ucred_authid(pid, 0x4801000000000013L);
 
-    /* Global mount table for shadowmount detection. getmntinfo's buffer is
-       libc-managed — must NOT be freed. */
-    nmounts = getmntinfo(&mounts, MNT_NOWAIT);
-    if (nmounts < 0) { nmounts = 0; mounts = NULL; }
+    if (atomic_load(&g_scan_locked))
+        return rescan_relative(titles_out, count_out);
 
     root_vnode = kernel_get_root_vnode();
     if (root_vnode) {
@@ -532,20 +626,65 @@ patchdl_scan(patchdl_title_t **titles_out, size_t *count_out) {
         if (saved_root) {
             kernel_set_proc_rootdir(pid, root_vnode);
             using_vswap = 1;
+            if (g_sysroot_fd < 0)
+                g_sysroot_fd = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
         }
     }
 
-    for (int i = 0; SCAN_DIRS[i]; i++)
-        scan_base(SCAN_DIRS[i], arr, &cnt, MAX_TITLES, mounts, nmounts);
-
-    merge_appdb(arr, cnt);
+    rc = scan_all(titles_out, count_out);
 
     if (using_vswap)
         kernel_set_proc_rootdir(pid, saved_root);
+    return rc;
+}
 
-    *titles_out = arr;
-    *count_out  = cnt;
-    return 0;
+int
+patchdl_scan_read_app_file(const char *title_id, const char *name,
+                           char *buf, size_t sz) {
+    char path[PATH_MAX];
+    if (g_sysroot_fd < 0 || !sz) return -1;
+    for (int i = 0; SCAN_DIRS[i]; i++) {
+        int     fd;
+        ssize_t n;
+        snprintf(path, sizeof(path), "%s/%s/%s", SCAN_DIRS[i] + 1, title_id, name);
+        fd = openat(g_sysroot_fd, path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) continue;
+        n = read(fd, buf, sz - 1);
+        close(fd);
+        if (n < 0) return -1;
+        buf[n] = '\0';
+        return 0;
+    }
+    return -1;
+}
+
+/* Fold one stat result into an FNV-1a hash. */
+static unsigned long long
+sig_add(unsigned long long h, const char *rel) {
+    struct stat st;
+    long long   v[4] = {0};
+    if (fstatat(g_sysroot_fd, rel, &st, 0) == 0) {
+        v[0] = (long long)st.st_mtim.tv_sec;
+        v[1] = (long long)st.st_mtim.tv_nsec;
+        v[2] = (long long)st.st_size;
+        v[3] = (long long)st.st_ino;
+    }
+    for (size_t i = 0; i < sizeof v; i++) {
+        h ^= ((const unsigned char *)v)[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+unsigned long long
+patchdl_scan_signature(void) {
+    unsigned long long h = 14695981039346656037ULL;
+    if (g_sysroot_fd < 0) return 0;
+    for (int i = 0; SCAN_DIRS[i]; i++)
+        h = sig_add(h, SCAN_DIRS[i] + 1);
+    h = sig_add(h, "system_data/priv/mms/app.db");
+    h = sig_add(h, "system_data/priv/mms/app.db-wal");
+    return h ? h : 1;
 }
 
 void

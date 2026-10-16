@@ -4,6 +4,9 @@ const API = {
   config: "/api/config",
   downloads: "/api/downloads",
   installStatus: "/api/installstatus",
+  rescan: "/api/rescan",
+  storage: "/api/storage",
+  storageDelete: (titleId) => `/api/storage/${encodeURIComponent(titleId)}/delete`,
   action: (titleId, action) => `/api/titles/${encodeURIComponent(titleId)}/${action}`,
 };
 
@@ -117,7 +120,32 @@ document.addEventListener("DOMContentLoaded", () => {
   bindEvents();
   loadInitialData().then(openGuideFromHash);
   window.addEventListener("hashchange", openGuideFromHash);
+  setInterval(watchTitles, 5000);
 });
+
+// The server rescans on its own when games are added or removed and bumps
+// titles_gen whenever the list or an update check changes; reload quietly then.
+let watchBusy = false;
+async function watchTitles() {
+  if (watchBusy) return;   // a slow reload is still running
+  watchBusy = true;
+  try {
+    const response = await fetch(API.status, { cache: "no-store" });
+    if (!response.ok) return;
+    const status = await response.json();
+    const changed = state.status && status.titles_gen !== state.status.titles_gen;
+    if (changed) await loadInitialData({ quiet: true });
+    else { state.status = status; renderStatus(); }
+  } catch (_) { /* offline for a moment; the next tick retries */ }
+  finally { watchBusy = false; }
+}
+
+// Refresh button: ask for a rescan right away, then reload once it had time.
+async function rescanNow() {
+  try { await postJson(API.rescan, {}); } catch (_) { /* older server: plain reload */ }
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  await loadInitialData();
+}
 
 function bindElements() {
   Object.assign(els, {
@@ -133,6 +161,8 @@ function bindElements() {
     logOutput: document.getElementById("logOutput"),
     allowlistHosts: document.getElementById("allowlistHosts"),
     sourcePolicyList: document.getElementById("sourcePolicyList"),
+    storageList: document.getElementById("storageList"),
+    storageTotal: document.getElementById("storageTotal"),
     searchInput: document.getElementById("searchInput"),
     defaultPolicy: document.getElementById("defaultPolicy"),
     downloadDir: document.getElementById("downloadDir"),
@@ -182,7 +212,7 @@ function bindEvents() {
     });
   });
 
-  els.refreshBtn.addEventListener("click", loadInitialData);
+  els.refreshBtn.addEventListener("click", rescanNow);
   if (els.updateAllBtn) els.updateAllBtn.addEventListener("click", updateAll);
   els.saveBtn.addEventListener("click", saveConfig);
   els.clearLogBtn.addEventListener("click", () => { state.logs = []; renderLogs(); });
@@ -201,9 +231,10 @@ function setView(view) {
     else b.removeAttribute("aria-current");
   });
   document.querySelectorAll(".view").forEach((s) => s.classList.toggle("is-active", s.dataset.view === view));
+  if (view === "settings") loadStorage();
 }
 
-async function loadInitialData() {
+async function loadInitialData({ quiet = false } = {}) {
   state.usingFallback = false;
   const [status, config, titles, downloads] = await Promise.all([
     getJson(API.status, fallback.status),
@@ -223,13 +254,16 @@ async function loadInitialData() {
     // Neither state has a patch left to fetch, so drop stale job flags.
     if (old && g.status !== "up_to_date" &&
         (g.status !== "incompatible_fw" || g.manual_version)) {
-      if (old.downloaded) g.downloaded = true;
       if (old.installing) g.installing = true;
       if (old._autoInstalled) g._autoInstalled = true;
       if (old._localDownloading) g._localDownloading = true;
+      if (old._wasActive) g._wasActive = true;
     }
   });
 
+  // A background reload must not swap the real list for demo data because
+  // one request failed for a moment.
+  if (quiet && state.usingFallback) { state.usingFallback = false; return; }
   state = { ...state, status, config, titles, downloads };
   reconcileFromJobs(downloads);
 
@@ -238,7 +272,10 @@ async function loadInitialData() {
       state.titles.some((g) => g._localDownloading))
     startDownloadPolling();
   if (state.titles.some((g) => g.installing)) startInstallPolling();
-  showToast(state.usingFallback ? "Demo data loaded. API is not reachable yet." : "Data refreshed.");
+  // Pick up installs that are running while this page was (re)loaded.
+  if (!quiet) refreshInstallStatus();
+  if (!quiet)
+    showToast(state.usingFallback ? "Demo data loaded. API is not reachable yet." : "Data refreshed.");
 }
 
 async function getJson(url, fallbackValue) {
@@ -266,7 +303,15 @@ function renderStatus() {
   els.resolverValue.textContent = state.status.resolver || "--";
   const space = formatMb(state.status.free_space_mb);
   els.spaceValue.textContent = space;
-  els.downloadDirValue.textContent = state.status.download_dir || state.config.download_dir || "Download target";
+  const kept = Number(state.status.downloads_bytes) || 0;
+  if (kept > 0) {
+    // Packages on disk take space too; the link opens the list to manage them.
+    els.downloadDirValue.innerHTML =
+      `<button type="button" class="link-button">${formatBytes(kept)} in downloads · manage</button>`;
+    els.downloadDirValue.querySelector("button").addEventListener("click", () => setView("settings"));
+  } else {
+    els.downloadDirValue.textContent = state.status.download_dir || state.config.download_dir || "Download target";
+  }
   if (els.railFw) els.railFw.textContent = `FW ${state.status.firmware || "--"}`;
   if (els.railSpace) els.railSpace.textContent = `${space} free`;
   if (els.brandVersion)
@@ -351,10 +396,12 @@ function renderGames() {
 // One bucket per game for the filter chips, answering a single question: is
 // there something to get for this console? Where the patch comes from (Sony,
 // Prospero) and whether it installs or only downloads is shown on the card.
+function isPs4(game) { return (game.title_id || "").startsWith("CUSA"); }
+
 function gameCategory(game) {
   const policy = sourcePolicy(game);
   // Not supported = PatchDL can't install it (fake packages, mounted images).
-  if (game.patch_title_match === false || !policy.allow_install)
+  if (game.patch_title_match === false || !policy.allow_install || game.status === "blocked")
     return "blocked";
   if (game.downloading || game.resumable || game.downloaded || game.installing || game._jobState)
     return "updates";
@@ -428,7 +475,6 @@ function createGameCard(game) {
       ${game.downloading && game._jobState !== "queued" ? `<span class="pill live">Downloading</span>` : ""}
       ${game.resumable && !game.downloading ? `<span class="pill warn">Paused</span>` : ""}
       ${statusPill(game)}
-      ${storagePill(game)}
       ${sourcePill(game)}
     </div>
     <div class="versions">${versionsHtml(game)}</div>
@@ -462,10 +508,11 @@ function createGameCard(game) {
     card.appendChild(prog);
   } else if (game.installing) {
     const pct = Math.max(0, Math.min(100, Number(game.installProgress) || 0));
+    const indet = game.installStatus === "finishing" || game.installStatus === "waiting";
     const note = document.createElement("div");
     note.className = "card-progress";
     note.innerHTML = `
-      <div class="progress"><i style="width:${pct}%"></i></div>
+      <div class="progress${indet ? " is-indeterminate" : ""}"><i style="width:${indet ? 32 : pct}%"></i></div>
       <div class="progress-meta">${installProgressHtml(game)}</div>
     `;
     card.appendChild(note);
@@ -496,9 +543,9 @@ function buildToggle(game) {
   track.className = "track";
   const lbl = document.createElement("span");
   lbl.className = "label";
-  lbl.textContent = cb.checked ? "On" : "Off";
+  lbl.textContent = cb.checked ? "Updates on" : "Updates off";
   cb.addEventListener("change", () => {
-    lbl.textContent = cb.checked ? "On" : "Off";
+    lbl.textContent = cb.checked ? "Updates on" : "Updates off";
     updateGame(game.title_id, { enabled: cb.checked });
   });
   toggle.append(cb, track, lbl);
@@ -530,7 +577,9 @@ function primaryButton(game) {
 // Cancel stops AND deletes (unlike Pause, which keeps the partial).
 function stopButton(game) {
   if (game.installing) return null;
-  if (game.downloading || game.resumable || game.downloaded)
+  if (game.downloaded && !game.downloading)
+    return { label: "Delete", action: "cancel", variant: "cancel", hint: "Delete the downloaded package to free space." };
+  if (game.downloading || game.resumable)
     return { label: "Cancel", action: "cancel", variant: "cancel", hint: "Stop and delete the download." };
   return null;
 }
@@ -567,6 +616,7 @@ function versionsHtml(game) {
 function statusPill(game) {
   if (game.installing) return `<span class="pill warn">Installing…</span>`;
   if (game.status === "checking") return `<span class="pill">Checking…</span>`;
+  if (isPs4(game)) return `<span class="pill">PS4 · not supported</span>`;
   if (game.status === "blocked" || !sourcePolicy(game).allow_install)
     return `<span class="pill">Not supported</span>`;
   if (game.patch_title_match === false) return `<span class="pill blocked">Title mismatch</span>`;
@@ -576,11 +626,6 @@ function statusPill(game) {
     return `<span class="pill">Newest needs FW ${escapeHtml(game.latest_required_fw || "?")}</span>`;
   if (game.status === "up_to_date") return `<span class="pill">Up to date</span>`;
   return `<span class="pill">No patch info</span>`;
-}
-
-function storagePill(game) {
-  return hasSharedStorage(game) && sourcePolicy(game).allow_install
-    ? `<span class="pill warn">Shared master</span>` : "";
 }
 
 function sourcePill(game) {
@@ -605,6 +650,7 @@ function progressMetaHtml(d) {
   const speed = Number(d._speed) || 0;
   if (d.state === "queued") return `<span>Queued — waiting for a free slot</span>`;
   const parts = [];
+  if (d.verifying) parts.push(`<span><b>Checking the package already on disk</b></span>`);
   parts.push(`<span><b>${formatBytes(done)}</b>${total > 0 ? ` / ${formatBytes(total)}` : ""}</span>`);
   if (speed > 0) parts.push(`<span><b>${formatBytes(speed)}/s</b></span>`);
   if (speed > 0 && total > done) parts.push(`<span>ETA <b>${formatEta((total - done) / speed)}</b></span>`);
@@ -613,10 +659,25 @@ function progressMetaHtml(d) {
   return parts.join("");
 }
 
+const INSTALL_PHASE_TEXT = {
+  waiting: "Waiting for the console",
+  reading: "Console reading package",
+  finishing: "Finishing on console",
+};
+
 function installProgressHtml(game) {
   const status = game.installStatus || "waiting";
   const done = Number(game.installDone) || 0;
   const total = Number(game.installTotal) || 0;
+  const phase = INSTALL_PHASE_TEXT[status];
+  if (phase) {
+    const parts = [`<span><b>${phase}</b></span>`];
+    if (status === "reading" && total > 0) {
+      parts.push(`<span><b>${formatBytes(done)}</b> / ${formatBytes(total)}</span>`);
+      parts.push(`<span><b>${Math.max(0, Math.min(100, Number(game.installProgress) || 0))}%</b></span>`);
+    }
+    return parts.join("");
+  }
   const parts = [`<span>Status <b>${escapeHtml(status)}</b></span>`];
   if (total > 0) parts.push(`<span><b>${formatBytes(done)}</b> / ${formatBytes(total)}</span>`);
   parts.push(`<span><b>${Math.max(0, Math.min(100, Number(game.installProgress) || 0))}%</b></span>`);
@@ -654,6 +715,9 @@ function reconcileFromJobs(jobs) {
       g._jobState = null;
       return;
     }
+    // A download started from this page counts as watched even if it
+    // finished before a poll saw it running (a verified package on disk).
+    if (g._localDownloading) g._wasActive = true;
     g._localDownloading = false; // the pool now tracks it
     g._jobState = j.state;
     if (j.state === "active" || j.state === "queued") {
@@ -667,12 +731,18 @@ function reconcileFromJobs(jobs) {
       g.partial_bytes = Number(j.bytes) || g.partial_bytes || 0;
       g._wasActive = false;
     } else if (j.state === "done") {
+      // Auto-install once, on the download finishing while this page watched
+      // it, and only while the update is still pending. A finished job stays
+      // in the pool; without these checks every poll would retry the install
+      // (refused as already installed) and redraw the list each time.
+      const justFinished = g._wasActive;
+      const pending = g.status === "available" || Boolean(g.manual_version);
       g.downloading = false;
       g.resumable = false;
       g.downloaded = true;
       g._wasActive = false;
-      if (state.config.install_after_download && isInstallAllowed(g) &&
-          !g.installing && !g._autoInstalled) {
+      if (justFinished && pending && state.config.install_after_download &&
+          isInstallAllowed(g) && !g.installing && !g._autoInstalled) {
         g._autoInstalled = true;
         doInstall(g);
       }
@@ -719,6 +789,50 @@ async function refreshInstallStatus() {
 
   if (!s || !s.active) {
     if (!state.titles.some((g) => g.installing)) stopInstallPolling();
+    return;
+  }
+
+  // Installs streamed from PatchDL: what PatchDL measured itself (how much
+  // of each package the console read) beats Sony's status query, which fails
+  // or reports nothing useful for them. One entry per title.
+  const streams = Array.isArray(s.streams) ? s.streams : [];
+  if (streams.length) {
+    let ended = false, changed = false;
+    streams.forEach((st) => {
+      const game = state.titles.find((g) => g.title_id.startsWith(st.title_id));
+      if (!game) return;
+      const over = st.phase === "done" || st.phase === "stalled";
+      if (over && !game.installing) return;   // finished before this page watched it
+      const total = Number(st.total) || 0;
+      const read = Math.min(Number(st.read) || 0, total || Infinity);
+      const pct = total ? Math.floor((read * 100) / total) : 0;
+      // Re-render only on a visible change: a rebuilt card restarts the
+      // indeterminate bar's animation.
+      if (game.installing !== !over || game.installStatus !== st.phase ||
+          game.installProgress !== pct) changed = true;
+      game.installing = !over;
+      game.installStatus = st.phase;
+      game.installProgress = pct;
+      game.installDone = read;
+      game.installTotal = total;
+      if (over) {
+        const msg = st.phase === "stalled"
+          ? "stopped: the console stopped reading the package"
+          : st.verified
+            ? `done and verified${st.deleted ? ", package deleted" : ", package kept"}`
+            : "finished, but the new version could not be confirmed; package kept";
+        state.logs.push(`[${timeNow()}] Install ${game.title_id}: ${msg}.`);
+        showToast(`${game.name}: install ${msg}.`);
+        ended = true;
+      }
+    });
+    if (changed) renderGames();
+    if (state.titles.some((g) => g.installing)) startInstallPolling();
+    if (ended) {
+      renderLogs();
+      if (!state.titles.some((g) => g.installing)) stopInstallPolling();
+      loadInitialData({ quiet: true });
+    }
     return;
   }
 
@@ -809,7 +923,7 @@ function renderGlobalStatus() {
   const isActive = active && active.state === "active";
 
   // Eyebrow + name
-  els.globalDlState.textContent = isActive ? "Downloading" : "Queued";
+  els.globalDlState.textContent = !isActive ? "Queued" : active.verifying ? "Verifying" : "Downloading";
   els.globalDlName.textContent  = active.name || active.title_id || "—";
 
   // Position chip ("3 of 9") only when there's more than one game in this run
@@ -863,6 +977,77 @@ function applyDownloadProgress() {
 }
 
 /* ---------------- settings ---------------- */
+
+const STORAGE_STATE = {
+  complete: { label: "Complete", className: "ok" },
+  paused: { label: "Paused", className: "warn" },
+  downloading: { label: "Downloading", className: "live" },
+  installing: { label: "Installing", className: "live" },
+  failed: { label: "Failed", className: "blocked" },
+};
+
+// What PatchDL keeps under /data/patchdl, one row per title folder, with a
+// delete button that also works for games that are no longer installed.
+async function loadStorage() {
+  if (!els.storageList) return;
+  let data;
+  try {
+    const response = await fetch(API.storage, { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    data = await response.json();
+  } catch (error) {
+    els.storageList.innerHTML = `<p class="storage-empty">Could not read the download folder.</p>`;
+    return;
+  }
+  const items = (data.items || []).sort((a, b) => b.bytes - a.bytes);
+  els.storageTotal.textContent = items.length ? `${formatBytes(data.total_bytes)} in total` : "";
+  if (!items.length) {
+    els.storageList.innerHTML = `<p class="storage-empty">Nothing downloaded.</p>`;
+    return;
+  }
+  els.storageList.replaceChildren(...items.map((item) => {
+    const info = STORAGE_STATE[item.state] || STORAGE_STATE.complete;
+    const busy = item.state === "installing" || item.state === "downloading";
+    const row = document.createElement("div");
+    row.className = "storage-row";
+    row.innerHTML = `
+      <span><strong>${escapeHtml(item.name || item.title_id)}</strong><br>
+        <em>${escapeHtml(item.title_id)}${item.version ? ` · ${escapeHtml(item.version)}` : ""} · ${storageRelation(item)}</em></span>
+      <span class="pill ${info.className}">${info.label}</span>
+      <b>${formatBytes(item.bytes)}</b>
+    `;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "row-button is-cancel";
+    btn.textContent = "Delete";
+    btn.disabled = busy;
+    btn.title = busy ? "Busy right now" : `Delete ${formatBytes(item.bytes)} for ${item.name || item.title_id}`;
+    btn.addEventListener("click", () => deleteStorage(item));
+    row.appendChild(btn);
+    return row;
+  }));
+}
+
+// How the package relates to the installed game, so a kept package can be
+// judged: still useful (newer), spent (installed), or for a game not present.
+function storageRelation(item) {
+  if (!item.installed) return "game not installed";
+  if (!item.version || !item.installed_version) return "version unknown";
+  return item.version > item.installed_version ? "newer than installed" : "already installed";
+}
+
+async function deleteStorage(item) {
+  const label = item.name || item.title_id;
+  if (!window.confirm(`Delete the download for ${label} (${formatBytes(item.bytes)})?`)) return;
+  try {
+    await postJson(API.storageDelete(item.title_id), {});
+    showToast(`${label}: download deleted.`);
+  } catch (error) {
+    showToast(`${label}: ${reasonText(error)}`);
+  }
+  await loadStorage();
+  await loadInitialData({ quiet: true });
+}
 
 function renderSourcePolicies() {
   const rows = Object.keys(SOURCE_TYPES).map((type) => {
@@ -970,6 +1155,7 @@ async function doDownload(game) {
 }
 
 async function doInstall(game) {
+  const wasDownloaded = game.downloaded;
   game.installing = true;
   game.installStatus = "starting";
   game.installProgress = 0;
@@ -978,7 +1164,13 @@ async function doInstall(game) {
   try {
     await postJson(API.action(game.title_id, "install"), {});
   } catch (error) {
-    game.installing = false;
+    game.downloaded = wasDownloaded;   // refused: the package is untouched
+    if (error.body && error.body.reason === "install_running") {
+      // Another tab or device started it: follow that install here.
+      startInstallPolling();
+    } else {
+      game.installing = false;
+    }
     const why = reasonText(error);
     state.logs.push(`[${timeNow()}] install ${game.title_id} blocked: ${why}`);
     showToast(`${game.name}: ${why}`);
@@ -1001,6 +1193,7 @@ async function cancelDownload(titleId) {
     showToast(`${game ? game.name : titleId}: download cancelled / deleted.`);
   } catch (error) {
     showToast(`${game ? game.name : titleId}: ${reasonText(error)}`);
+    return;   // refused (e.g. the console is installing from it): nothing changed
   }
   if (game) {
     game.downloading = false;
@@ -1054,12 +1247,6 @@ function updateGame(titleId, patch) {
 /* ---------------- policy helpers ---------------- */
 
 function isInstallBlocked(game) { return !sourcePolicy(game).allow_install; }
-function hasSharedStorage(game) {
-  if (game.patch_storage_match === false) return true;
-  const storage = (game.patch_storage_title_id || "").slice(0, 9);
-  const target = (game.title_id || "").slice(0, 9);
-  return Boolean(storage && target && storage !== target);
-}
 function isDownloadAllowed(game) {
   return Boolean(
     game.enabled !== false &&
@@ -1109,6 +1296,12 @@ const REASON_TEXT = {
   download_failed: "Download failed.",
   download_in_progress: "Another download is already running.",
   piece_verify_failed: "A downloaded piece failed its SHA-256 check.",
+  install_running: "The console is installing from this package right now. Try again when it is done.",
+  already_installed: "This version is already installed.",
+  ps4_not_supported: "PS4 games are not supported.",
+  too_many_installs: "Too many installs running at once. Try again when one has finished.",
+  download_incomplete: "The download is not complete yet.",
+  download_unverified: "The package on disk hasn't been checked yet. Press Update: PatchDL verifies it and downloads only what's missing.",
   title_disabled: "This title is disabled.",
   download_paused: "Download paused.",
   not_downloading: "Nothing is downloading for this title.",

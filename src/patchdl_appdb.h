@@ -22,9 +22,12 @@ typedef struct {
 
 /* Read the PS5 app database (tbl_contentinfo) for installed-title metadata.
    Returns 0 on success with a malloc'd array (caller frees with
-   patchdl_appdb_free). Requires the root-vnode swap + elevated authid to be
-   in effect (the caller arranges this). */
-int  patchdl_appdb_load(patchdl_appinfo_t **out, size_t *count);
+   patchdl_appdb_free). Requires elevated authid plus either the root-vnode
+   swap or, with `relative` set, the working directory at the system root
+   (the caller arranges this). */
+int  patchdl_appdb_load(patchdl_appinfo_t **out, size_t *count, int relative);
+/* Why the last relative load failed to copy app.db (errno text), or "". */
+const char *patchdl_appdb_error(void);
 void patchdl_appdb_free(patchdl_appinfo_t *arr);
 
 const patchdl_appinfo_t *patchdl_appdb_find(const patchdl_appinfo_t *arr,

@@ -370,11 +370,11 @@ h2 { font-size: 18px; line-height: 1.2; }
 .cover {
   display: grid;
   place-items: center;
-  width: 48px; height: 48px;
+  width: 64px; height: 64px;
   color: #fff;
   background: linear-gradient(135deg, #2d6d9d, #247857);
-  border-radius: 10px;
-  font-size: 14px;
+  border-radius: 12px;
+  font-size: 16px;
   font-weight: 800;
   overflow: hidden;
 }
@@ -465,6 +465,10 @@ h2 { font-size: 18px; line-height: 1.2; }
   height: 100%;
   background: linear-gradient(90deg, var(--green), var(--blue));
   transition: width 320ms ease;
+}
+.progress.is-indeterminate > i {
+  animation: globalDlIndet 1.6s ease-in-out infinite;
+  transition: none;
 }
 .progress-meta {
   display: flex;
@@ -559,8 +563,39 @@ h2 { font-size: 18px; line-height: 1.2; }
 .toggle input:checked + .track::after { transform: translateX(18px); background: var(--green); }
 .toggle input:focus-visible + .track { outline: 2px solid var(--blue); outline-offset: 2px; }
 .toggle .label { font-size: 12px; color: var(--muted); min-width: 22px; }
+.lead .toggle .label { white-space: nowrap; }
 
-.allowlist, .source-policy { display: grid; gap: 8px; margin-top: 16px; }
+.allowlist, .source-policy, .storage-list { display: grid; gap: 8px; margin-top: 16px; }
+.storage-list > span em { color: var(--muted); font-style: normal; margin-left: 6px; }
+.storage-list > div { display: grid; gap: 8px; }
+.storage-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.storage-row strong { font-size: 13px; overflow-wrap: anywhere; }
+.storage-row em { color: var(--muted); font-style: normal; font-size: 12px; }
+.storage-row b { font-variant-numeric: tabular-nums; }
+.storage-empty { color: var(--muted); font-size: 13px; }
+.link-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--blue);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.link-button:hover { color: var(--ink); }
+@media (max-width: 640px) {
+  .storage-row { grid-template-columns: minmax(0, 1fr) auto; }
+}
 .allowlist div { display: flex; flex-wrap: wrap; gap: 6px; }
 .source-policy > div { display: grid; gap: 8px; }
 
@@ -756,6 +791,17 @@ pre {
 }
 
 /* ---------------- responsive ---------------- */
+
+/* Wide screens (desktop, PS5 browser): bigger covers so a card doesn't look
+   empty. */
+@media (min-width: 900px) {
+  .game-card { padding: 18px 20px; }
+  .cover { width: 104px; height: 104px; border-radius: 14px; font-size: 22px; }
+  .card-row { gap: 20px; }
+  .card-body h3 { font-size: 19px; margin-bottom: 8px; }
+  .subline { font-size: 13px; }
+  .versions { font-size: 13px; }
+}
 
 @media (max-width: 1024px) {
   .app-shell { grid-template-columns: 1fr; }
