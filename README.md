@@ -5,14 +5,15 @@
 </p>
 
 <p align="center">
-  <b>Official game updates for your PS5, from any browser.</b><br>
-  PatchDL finds the newest update for every game on your console, downloads it at full speed and installs it.<br>
+  <b>Official updates for your PS5 and PS4 games, from any browser.</b><br>
+  PatchDL finds the newest update for every PS5 and PS4 game on your console, downloads it at full speed and installs it.<br>
   Run it from your phone, your laptop or the PS5 itself.
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/github/v/release/knutwurst/ps5-patchdl?style=for-the-badge&label=release&color=22c55e" alt="Latest release">
   <img src="https://img.shields.io/github/downloads/knutwurst/ps5-patchdl/total?style=for-the-badge&color=22c55e" alt="Downloads">
+  <img src="https://img.shields.io/badge/games-PS5%20%7C%20PS4-22c55e?style=for-the-badge" alt="PS5 and PS4 games">
   <img src="https://img.shields.io/badge/FW-1.00%E2%80%9313.60-22c55e?style=for-the-badge" alt="Firmware 1.00 to 13.60">
   <img src="https://img.shields.io/badge/UI-any%20browser-22c55e?style=for-the-badge" alt="Web UI in any browser">
   <img src="https://img.shields.io/github/license/knutwurst/ps5-patchdl?style=for-the-badge&color=3a3a3a" alt="License">
@@ -28,6 +29,7 @@
 
 ## Highlights
 
+- **PS5 and PS4 games.** PatchDL updates both, straight from Sony's servers. PS4 updates land where the console keeps them, next to the game.
 - **Your whole library at a glance.** Every installed game shows up with its icon, its version and the newest update Sony offers for it, sorted A to Z. Install or remove a game and the list follows within seconds, no restart needed.
 - **Update all.** One click queues every game that has an update. PatchDL works through the queue and installs each update as soon as it lands.
 - **Fast downloads.** Up to 16 parallel connections per update. Change the number in Settings while a download runs.
