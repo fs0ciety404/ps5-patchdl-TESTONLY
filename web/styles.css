@@ -467,8 +467,15 @@ h2 { font-size: 18px; line-height: 1.2; }
   transition: width 320ms ease;
 }
 .progress.is-indeterminate > i {
-  animation: globalDlIndet 1.6s ease-in-out infinite;
+  animation: progressSweep 1.6s linear infinite;   /* duration = INDET_MS */
   transition: none;
+}
+@keyframes progressSweep {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(320%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .progress.is-indeterminate > i { animation: none; width: 100% !important; opacity: 0.5; }
 }
 .progress-meta {
   display: flex;

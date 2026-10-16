@@ -512,7 +512,7 @@ function createGameCard(game) {
     const note = document.createElement("div");
     note.className = "card-progress";
     note.innerHTML = `
-      <div class="progress${indet ? " is-indeterminate" : ""}"><i style="width:${indet ? 32 : pct}%"></i></div>
+      <div class="progress${indet ? " is-indeterminate" : ""}"><i style="width:${indet ? 32 : pct}%${indet ? `;animation-delay:-${Date.now() % INDET_MS}ms` : ""}"></i></div>
       <div class="progress-meta">${installProgressHtml(game)}</div>
     `;
     card.appendChild(note);
@@ -658,6 +658,11 @@ function progressMetaHtml(d) {
   parts.push(`<span><b>${pctOf(d)}%</b></span>`);
   return parts.join("");
 }
+
+// One sweep of the indeterminate bar. Cards are rebuilt on every list
+// update; a negative delay taken from the clock lets a rebuilt bar continue
+// where the old one was instead of starting over.
+const INDET_MS = 1600;
 
 const INSTALL_PHASE_TEXT = {
   waiting: "Waiting for the console",
