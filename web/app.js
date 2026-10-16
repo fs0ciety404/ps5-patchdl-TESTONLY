@@ -122,7 +122,46 @@ document.addEventListener("DOMContentLoaded", () => {
   loadInitialData().then(openGuideFromHash);
   window.addEventListener("hashchange", openGuideFromHash);
   setInterval(watchTitles, 5000);
+  document.querySelectorAll("[data-donate]").forEach((b) => b.addEventListener("click", openDonate));
 });
+
+const DONATE_URL = "https://paypal.me/oliverkoester";
+
+// Donation dialog. On the TV a link is no use, so it shows a QR code for
+// the phone (hidden on phones, where the button opens PayPal directly).
+function openDonate() {
+  const back = document.activeElement;
+  const matrix = qrEncode(DONATE_URL);
+  const wrap = document.createElement("div");
+  wrap.className = "guide-backdrop";
+  wrap.innerHTML = `
+    <section class="guide" role="dialog" aria-modal="true" aria-labelledby="donateTitle">
+      <header class="guide-head">
+        <div>
+          <p class="eyebrow">Support PatchDL</p>
+          <h2 id="donateTitle">Buy me a coffee</h2>
+        </div>
+        <button class="icon-button guide-close" type="button" aria-label="Close">×</button>
+      </header>
+      <p class="guide-why">If you like what I do, you can buy me a coffee.</p>
+      ${matrix ? `<div class="guide-qr">${qrSvg(matrix)}<div>
+        <span>Scan with your phone to open PayPal:</span>
+        <code>${escapeHtml(DONATE_URL)}</code></div></div>` : ""}
+      <a class="row-button is-update donate-open" href="${DONATE_URL}" target="_blank" rel="noopener">Open PayPal</a>
+      <p class="guide-why"><small>It doesn't have to be a generous donation. A few cents are enough to show me who is interested in further development. So the motivation stays and I just know that I am not programming for the bin ;)</small></p>
+    </section>`;
+  const close = () => {
+    document.removeEventListener("keydown", onKey);
+    wrap.remove();
+    if (back && document.contains(back)) back.focus();
+  };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  wrap.querySelector(".guide-close").addEventListener("click", close);
+  wrap.addEventListener("click", (e) => { if (e.target === wrap) close(); });
+  document.addEventListener("keydown", onKey);
+  document.body.appendChild(wrap);
+  wrap.querySelector(".guide-close").focus();
+}
 
 // The server rescans on its own when games are added or removed and bumps
 // titles_gen whenever the list or an update check changes; reload quietly then.

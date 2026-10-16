@@ -116,6 +116,23 @@ svg {
   font-size: 12px;
 }
 .rail-foot span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-foot .rail-donate { justify-self: start; margin-top: 4px; }
+
+.donate-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--muted);
+}
+.donate-row .row-button { width: auto; padding: 0 16px; }
+.donate-open { display: inline-flex; align-items: center; justify-content: center; text-decoration: none; justify-self: start; padding: 0 18px; }
 
 /* ---------------- views + topbar ---------------- */
 
