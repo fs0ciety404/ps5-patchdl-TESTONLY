@@ -79,7 +79,7 @@ Start an update from the couch with your phone, check on it from your laptop, or
 No. It fetches updates for games that are already installed on your console. Nothing else.
 
 **Which games does PatchDL update?**
-PS5 games you installed from disc or from the PlayStation Store. PatchDL reads each game's package before it offers anything, and it leaves every other title alone. PS4 games are not supported.
+PS5 and PS4 games you installed from disc or from the PlayStation Store. PatchDL reads each game's package before it offers anything, and it leaves every other title alone.
 
 **Where do the updates come from?**
 From Sony's official update servers, the same files your console downloads on its own. PatchDL downloads only from a short list of PlayStation CDN hosts. To find older patches it also asks [Prospero Patches](https://prosperopatches.com/) which versions exist for a game. That lookup sends the game's title ID and nothing else.
