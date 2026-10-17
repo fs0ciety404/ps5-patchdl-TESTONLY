@@ -52,9 +52,11 @@ fopen_safe(const char *path, int rw_existing) {
     int flags = O_CLOEXEC | O_NOFOLLOW;
     int fd;
     flags |= rw_existing ? O_RDWR : (O_WRONLY | O_CREAT | O_TRUNC);
+    FILE *fp;
     fd = open(path, flags, 0600);
     if (fd < 0) return NULL;
-    return fdopen(fd, rw_existing ? "r+b" : "wb");
+    if (!(fp = fdopen(fd, rw_existing ? "r+b" : "wb"))) close(fd);   /* fdopen keeps no fd on failure */
+    return fp;
 }
 #endif
 
@@ -465,8 +467,8 @@ http_download_to_file_progress(const char *url, FILE *fp, long long *bytes_out,
 
     if (verify) {
         sink.md = EVP_MD_CTX_new();
-        if (sink.md)
-            EVP_DigestInit_ex(sink.md, digest_for(expected_sha256_hex), NULL);
+        if (!sink.md) { curl_slist_free_all(rl); return -1; }   /* never skip a requested check */
+        EVP_DigestInit_ex(sink.md, digest_for(expected_sha256_hex), NULL);
     }
 
     ca_blob.data  = (void *)PATCHDL_SCEI_DNAS_ROOT_PEM;
@@ -497,6 +499,8 @@ http_download_to_file_progress(const char *url, FILE *fp, long long *bytes_out,
        hosts we'll talk to. NOSIGNAL stays — it protects the worker from a
        SIGPIPE on connection RST. */
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL,        1L);
+    /* an error page (404, 503) must not be saved as the file */
+    curl_easy_setopt(curl, CURLOPT_FAILONERROR,     1L);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT,  20L);
     /* No total timeout (patches can be large); abort only on a long stall. */
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
@@ -955,7 +959,8 @@ patchdl_http_download_piece(const char *url, int fd,
     if (verify) {
         sink.md_type = digest_for(expected_sha256_or_null);
         sink.md = EVP_MD_CTX_new();
-        if (sink.md) EVP_DigestInit_ex(sink.md, sink.md_type, NULL);
+        if (!sink.md) { curl_slist_free_all(rl); return -1; }   /* never skip a requested check */
+        EVP_DigestInit_ex(sink.md, sink.md_type, NULL);
         /* the part already on disk goes into the hash first */
         if (sink.md && resume_from) {
             int drc = digest_fd_region(sink.md, fd, file_offset, resume_from,
@@ -1045,7 +1050,9 @@ patchdl_http_download_piece(const char *url, int fd,
         if (strcasecmp(hex, expected_sha256_or_null) != 0)
             return -2;                      /* integrity mismatch */
     }
-    fdatasync(fd);                          /* durable before the caller sets the done bit */
+    /* durable before the caller sets the done bit; an error here means
+       the bytes may not be on disk, so the piece doesn't count */
+    if (fdatasync(fd) != 0) return -1;
     return 0;
 }
 
@@ -1124,13 +1131,12 @@ patchdl_fetch_manifest(const char *manifest_url, patchdl_manifest_t *out) {
     for (p = pieces; (p = strstr(p, "\"url\"")) && (!pieces_end || p < pieces_end); p += 5)
         cap++;
     if (cap <= 0) { free(buf.data); return -1; }
-    out->pieces = calloc((size_t)cap, sizeof(patchdl_piece_t));
-    if (!out->pieces) { free(buf.data); return -1; }
-
     /* Sanity caps: refuse a manifest that would let a CDN drive multi-TB
        allocations or millions of pieces. The biggest real PS5 patch we've
        seen is ~70 GB / 18 pieces; these limits leave room to spare. */
     if (cap > PATCHDL_MAX_PIECES) { free(buf.data); return -1; }
+    out->pieces = calloc((size_t)cap, sizeof(patchdl_piece_t));
+    if (!out->pieces) { free(buf.data); return -1; }
 
     p = pieces;
     while ((p = strstr(p, "\"url\"")) && (!pieces_end || p < pieces_end) && n < cap) {

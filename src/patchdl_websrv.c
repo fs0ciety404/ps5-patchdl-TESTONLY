@@ -245,6 +245,7 @@ typedef struct dl_job {
     int                rc;             /* 0 ok, -1 net/io, -2 verify, -3 no space */
     long long          need_bytes;     /* rc -3: bytes the package still needed */
     int                verifying;      /* admit is hashing a package found on disk */
+    int                in_admit;       /* admit_next holds this job with the lock dropped */
     long long          verify_bytes;   /* bytes hashed so far */
     long long          free_bytes;     /* rc -3: bytes free on /data at the time */
     int                last_curl_rc;   /* CURLcode from the most recent piece */
@@ -374,23 +375,24 @@ typedef struct {
     size_t cap;
 } jbuf_t;
 
-static void
+/* 0 when there is room for extra more bytes plus the NUL. */
+static int
 jbuf_ensure(jbuf_t *j, size_t extra) {
     if (!j->buf || j->len + extra + 1 > j->cap) {
         size_t newcap = (j->cap + extra + 1) * 2;
         if (newcap < 1024) newcap = 1024;
         char *p = realloc(j->buf, newcap);
-        if (!p) return;
+        if (!p) return -1;      /* the old buffer stays, but too small */
         j->buf = p;
         j->cap = newcap;
     }
+    return 0;
 }
 
 static void
 jbuf_append(jbuf_t *j, const char *s) {
     size_t slen = strlen(s);
-    jbuf_ensure(j, slen);
-    if (!j->buf) return;
+    if (jbuf_ensure(j, slen) || !j->buf) return;
     memcpy(j->buf + j->len, s, slen + 1);
     j->len += slen;
 }
@@ -414,6 +416,7 @@ jbuf_append_str(jbuf_t *j, const char *s) {
         else if (*p == '\n') jbuf_append(j, "\\n");
         else if (*p == '\r') jbuf_append(j, "\\r");
         else if (*p == '\t') jbuf_append(j, "\\t");
+        else if ((unsigned char)*p < 0x20) jbuf_appendf(j, "\\u%04x", (unsigned char)*p);
         else { char c[2] = {*p, '\0'}; jbuf_append(j, c); }
     }
     jbuf_append(j, "\"");
@@ -2002,6 +2005,7 @@ admit_next(void) {
     if (!q) return;
 
     g_pool.admitting = 1;
+    q->in_admit = 1;
     q->state = JOB_ADMITTING;       /* NOT claimable; a cancel/pause mid-admit only
                                        flags it — admit_next is the sole finalizer.
                                        g_pool.active stays NULL until fully built. */
@@ -2081,6 +2085,7 @@ admit_next(void) {
 
     pthread_mutex_lock(&g_pool.mtx);
     g_pool.admitting = 0;
+    q->in_admit = 0;
     /* During the unlocked I/O window do_cancel/do_pause may have flagged q
        (it stays JOB_ADMITTING otherwise). The job was never published as
        g_pool.active, so no worker touched it and q is still valid here. */
@@ -2120,25 +2125,16 @@ admit_next(void) {
 
     q->mf = mf; q->ps = ps; q->bitmap = bitmap; q->fd = fd; q->total = total;
     for (int i = 0; i < mf.count; i++) q->ps[i].slot = -1;
-    seed_from_sidecar(q);
+    /* a single package is fetched again from scratch (it was just
+       truncated), so an old sidecar says nothing about it */
+    if (is_manifest) seed_from_sidecar(q);
     q->pieces_done = 0;
     for (int i = 0; i < mf.count; i++)
         if (q->ps[i].state == PC_DONE) q->pieces_done++;
-    /* One-time migration: an old sequential partial (written in order, no
-       per-piece bitmap) is a contiguous prefix on disk. If the bitmap seed found
-       nothing and the file is a partial (smaller than the full preallocated
-       size), mark every piece fully within the on-disk bytes as done so we don't
-       re-download what's already there. The partial frontier piece is excluded. */
-    if (q->pieces_done == 0 && old_size > 0 && old_size < total) {
-        for (int i = 0; i < mf.count; i++)
-            if (mf.pieces[i].offset + mf.pieces[i].size <= old_size) {
-                q->ps[i].state = PC_DONE;
-                q->bitmap[i / 8] |= (unsigned char)(1 << (i % 8));
-                q->done_bytes += mf.pieces[i].size;
-                q->pieces_done++;
-            }
-        if (q->pieces_done > 0) write_job_state(q);  /* persist the migrated bitmap */
-    }
+    /* A shorter file without a sidecar is not trusted as a prefix: it may
+       have holes or foreign bytes. Its pieces are fetched again (or found
+       by verify_existing when the file is whole). */
+    (void)old_size;
     /* Pieces of a whole package found on disk that matched their hash. */
     if (q->pieces_done == 0 && pre_done) {
         for (int i = 0; i < mf.count; i++)
@@ -2349,8 +2345,11 @@ do_download(struct MHD_Connection *conn, const char *title_id,
     pthread_mutex_unlock(&g_mutex);
 
     pthread_mutex_lock(&g_pool.mtx);
+    /* Finished and failed jobs stay listed (one per title, so bounded by
+       the library) but don't take a queue slot: "Update all" on a big
+       library must not hit queue_full. */
     for (job = g_pool.jobs; job; job = job->next) {
-        count++;
+        if (job->state != JOB_DONE && job->state != JOB_FAILED) count++;
         if (!strcmp(job->title_id, title_id)) existing = job;
     }
     if (existing) {
@@ -2378,9 +2377,8 @@ do_download(struct MHD_Connection *conn, const char *title_id,
             return queue_json(conn, MHD_HTTP_OK,
                               "{\"ok\":true,\"downloaded\":true,\"already\":true}");
         }
-        /* FAILED: drop it and re-enqueue fresh below */
+        /* FAILED: drop it and re-enqueue fresh below (it took no slot) */
         free_job_locked(existing);
-        count--;
     }
     if (count >= POOL_MAX_JOBS) {
         pthread_mutex_unlock(&g_pool.mtx);
@@ -2473,10 +2471,13 @@ cancel_title(const char *title_id) {
     for (job = g_pool.jobs; job; job = job->next) {
         if (strcmp(job->title_id, title_id)) continue;
         had_job = 1;
-        if (job->state == JOB_ADMITTING) {
-            /* being admitted (lock dropped for manifest I/O): only flag it.
-               admit_next holds a raw pointer to this job and is the sole
-               finalizer once it relocks — freeing here would be a UAF. */
+        if (job->state == JOB_CANCELLING) {
+            /* already on its way out; its finalizer runs once */
+        } else if (job->in_admit) {
+            /* being admitted (lock dropped for manifest I/O), possibly
+               flagged PAUSING meanwhile: only flag it. admit_next holds a
+               raw pointer to this job and is the sole finalizer once it
+               relocks — freeing here would be a UAF. */
             job->state = JOB_CANCELLING;
             job->seq++;
             job->abort = 1;
@@ -3702,7 +3703,9 @@ on_request(void *cls, struct MHD_Connection *conn, const char *url,
             }
         pthread_mutex_unlock(&g_mutex);
         if (uri[0]) patchdl_net_diag(uri, diag, sizeof(diag));
-        return queue_json(conn, MHD_HTTP_OK, diag);
+        /* diag lives on this stack; MHD sends after we return */
+        return queue_buffer(conn, MHD_HTTP_OK, "application/json",
+                            diag, strlen(diag), MHD_RESPMEM_MUST_COPY);
     }
 
     if (!strncmp(url, "/api/pkg/", 9))
