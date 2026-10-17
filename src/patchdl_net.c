@@ -1021,7 +1021,7 @@ patchdl_http_download_piece(const char *url, int fd,
     if (res != CURLE_OK) {
         if (sink.md) EVP_MD_CTX_free(sink.md);
         /* -3: the server can't continue where this piece stopped */
-        return sink.bad_range || http_code == 416 ? -3 : -1;
+        return sink.resume && (sink.bad_range || http_code == 416) ? -3 : -1;
     }
     if (file_size > 0 && sink.written != file_size) {
         if (sink.md) EVP_MD_CTX_free(sink.md);
