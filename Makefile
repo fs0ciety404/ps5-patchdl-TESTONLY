@@ -20,6 +20,7 @@ SRCS := src/main.c \
         src/patchdl_scan.c \
         src/patchdl_appdb.c \
         src/patchdl_net.c \
+        src/patchdl_dns.c \
         src/patchdl_prospero.c \
         src/patchdl_resolve.c \
         src/patchdl_verxml.c \

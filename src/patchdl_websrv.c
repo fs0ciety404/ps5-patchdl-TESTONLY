@@ -13,6 +13,7 @@
 #include "patchdl_scan.h"
 #include "patchdl_install.h"
 #include "patchdl_net.h"
+#include "patchdl_dns.h"
 #include "patchdl_resolve.h"
 #include "patchdl_tile.h"
 #include "patchdl_verxml.h"
@@ -2631,12 +2632,35 @@ queue_versions(struct MHD_Connection *conn, const char *tid) {
     return queue_json_owned(conn, MHD_HTTP_OK, j.buf);
 }
 
+/* A fresh DNS answer for host as "ip", "ips", "dns" (where it came from)
+   and "dns_trail" (what failed before), so a report tells a blocked DNS
+   apart from a blocked connection. */
+static void
+append_dns(jbuf_t *j, const char *host) {
+    patchdl_dns_answer_t a;
+    char                 ips[PATCHDL_DNS_MAX_IPS * 16 + 8] = "";
+
+    memset(&a, 0, sizeof a);
+    if (host[0]) {
+        patchdl_dns_forget(host);
+        patchdl_dns_lookup(host, &a);
+    }
+    for (int i = 0; i < a.n; i++) {
+        size_t len = strlen(ips);
+        snprintf(ips + len, sizeof ips - len, "%s%s", i ? "," : "", a.ip[i]);
+    }
+    jbuf_append(j, ",\"ip\":");        jbuf_append_str(j, a.n ? a.ip[0] : "");
+    jbuf_append(j, ",\"ips\":");       jbuf_append_str(j, ips);
+    jbuf_append(j, ",\"dns\":");       jbuf_append_str(j, a.source);
+    jbuf_append(j, ",\"dns_trail\":"); jbuf_append_str(j, a.trail);
+}
+
 /* GET /api/netcheck?title=<id>: walk one title's update chain the way a
    download does (update list, then the package manifest) and report each
    step with PatchDL's own DNS answer, so a report shows where it breaks. */
 static enum MHD_Result
 queue_netcheck_title(struct MHD_Connection *conn, const char *tid) {
-    char              vurl[512] = "", host[128], ip[48], step[24], tid9[16];
+    char              vurl[512] = "", host[128], step[24], tid9[16];
     char              murl[768] = "", durl[512], ptid[16], pstid[16], cid[64];
     char              nm[128], ver[16];
     patchdl_source_t  src;
@@ -2664,9 +2688,7 @@ queue_netcheck_title(struct MHD_Connection *conn, const char *tid) {
     jbuf_append(&j, "{\"title_id\":");  jbuf_append_str(&j, tid);
     jbuf_append(&j, ",\"update_list\":{\"url\":"); jbuf_append_str(&j, vurl);
     url_host_of(vurl, host, sizeof host);
-    ip[0] = '\0';
-    if (host[0]) patchdl_resolve_host(host, ip, sizeof ip);
-    jbuf_append(&j, ",\"ip\":"); jbuf_append_str(&j, ip);
+    append_dns(&j, host);
     memset(&info, 0, sizeof info);
     vrc = vurl[0] ? patchdl_verxml_query(vurl, g_fw.bin, &info) : -1;
     patchdl_http_last_error(step, sizeof step, &curl_rc, &http);
@@ -2683,9 +2705,7 @@ queue_netcheck_title(struct MHD_Connection *conn, const char *tid) {
         snprintf(murl, sizeof murl, "%s", info.compatible_url);
     jbuf_append(&j, "},\"manifest\":{\"url\":"); jbuf_append_str(&j, murl);
     url_host_of(murl, host, sizeof host);
-    ip[0] = '\0';
-    if (host[0]) patchdl_resolve_host(host, ip, sizeof ip);
-    jbuf_append(&j, ",\"ip\":"); jbuf_append_str(&j, ip);
+    append_dns(&j, host);
     memset(&mf, 0, sizeof mf);
     step[0] = '\0'; curl_rc = 0; http = 0;
     if (url_is_manifest(murl)) {

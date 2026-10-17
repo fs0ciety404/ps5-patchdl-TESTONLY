@@ -8,6 +8,7 @@
  */
 
 #include "patchdl_net.h"
+#include "patchdl_dns.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -28,10 +29,6 @@
 #include <openssl/evp.h>
 #include "patchdl_ca.h"
 #endif
-
-#define DNS_SERVER     "1.1.1.1"
-#define DNS_PORT       53
-#define DNS_TIMEOUT_MS 3000
 
 /* Manifest sanity caps — reject anything bigger than a real PS5 patch. The
    largest title we've seen tops out around 70 GB / 18 pieces. */
@@ -110,12 +107,39 @@ set_last(const char *step, int curl_rc, long http_code) {
     g_last.http_code = http_code;
 }
 
-/* PatchDL's own DNS answer for a host (first A record), for diagnostics. */
-static int dns_lookup(const char *host, char *ip_out, size_t ip_sz);
+/* CURLOPT_RESOLVE entries for host on 443 and 80 from PatchDL's own
+   resolver (patchdl_dns.c), with every address it found. NULL when the host
+   can't be resolved. */
+static struct curl_slist *
+resolve_list_for(const char *host) {
+    patchdl_dns_answer_t a;
+    char                 entry[PATCHDL_DNS_ENTRY_MAX];
+    struct curl_slist   *rl, *both;
 
-int
-patchdl_resolve_host(const char *host, char *ip_out, size_t ip_sz) {
-    return dns_lookup(host, ip_out, ip_sz);
+    if (patchdl_dns_lookup(host, &a) ||
+        patchdl_dns_resolve_entry(&a, host, 443, entry, sizeof entry) ||
+        !(rl = curl_slist_append(NULL, entry)))
+        return NULL;
+    if (patchdl_dns_resolve_entry(&a, host, 80, entry, sizeof entry) ||
+        !(both = curl_slist_append(rl, entry))) {
+        curl_slist_free_all(rl);
+        return NULL;
+    }
+    return both;
+}
+
+/* None of the host's addresses took the connection (refused, or silently
+   dropped until the timeout): the next request asks DNS again instead of
+   reusing the cached answer. A timeout on an established transfer says
+   nothing about the addresses. Call before curl_easy_cleanup. */
+static void
+note_curl_result(CURL *curl, const char *host, CURLcode res) {
+    curl_off_t connect_us = 0;
+    if (res == CURLE_OPERATION_TIMEDOUT)
+        curl_easy_getinfo(curl, CURLINFO_CONNECT_TIME_T, &connect_us);
+    if (res == CURLE_COULDNT_CONNECT || res == CURLE_COULDNT_RESOLVE_HOST ||
+        (res == CURLE_OPERATION_TIMEDOUT && connect_us == 0))
+        patchdl_dns_forget(host);
 }
 
 void
@@ -148,164 +172,6 @@ url_host(const char *url, char *out, size_t out_sz) {
     return 0;
 }
 
-/* ---------- raw UDP DNS resolver ---------------------------------------- */
-
-/* Diagnostics from the last dns_resolve() call (read by patchdl_net_diag).
-   step: 0=ok 1=socket 2=sendto 3=recv<12 4=no-answer. */
-static int g_dns_step, g_dns_errno, g_dns_n, g_dns_ancount;
-
-static int
-dns_encode_name(const char *host, uint8_t *buf, size_t bufsz) {
-    size_t pos = 0;
-    const char *p = host;
-
-    while (*p) {
-        const char *dot = strchr(p, '.');
-        size_t lablen = dot ? (size_t)(dot - p) : strlen(p);
-        if (lablen > 63 || pos + 1 + lablen + 1 >= bufsz) return -1;
-        buf[pos++] = (uint8_t)lablen;
-        memcpy(buf + pos, p, lablen);
-        pos += lablen;
-        p += lablen;
-        if (*p == '.') p++;
-    }
-    buf[pos++] = 0;
-    return (int)pos;
-}
-
-static int
-dns_resolve(const char *host, char *ip_out, size_t ip_sz) {
-    int              fd;
-    struct sockaddr_in srv;
-    uint8_t          pkt[512], resp[512];
-    ssize_t          n;
-    int              name_len;
-    size_t           pos;
-    struct timeval   tv;
-
-    g_dns_step = 0; g_dns_errno = 0; g_dns_n = 0; g_dns_ancount = 0;
-
-    fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) { g_dns_step = 1; g_dns_errno = errno; return -1; }
-
-    tv.tv_sec  = DNS_TIMEOUT_MS / 1000;
-    tv.tv_usec = (DNS_TIMEOUT_MS % 1000) * 1000;
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-    memset(&srv, 0, sizeof(srv));
-    srv.sin_family      = AF_INET;
-    srv.sin_port        = htons(DNS_PORT);
-    srv.sin_addr.s_addr = inet_addr(DNS_SERVER);
-
-    memset(pkt, 0, sizeof(pkt));
-    pkt[0] = 0xDE; pkt[1] = 0xAD; /* ID */
-    pkt[2] = 0x01; pkt[3] = 0x00; /* standard query, RD */
-    pkt[4] = 0x00; pkt[5] = 0x01; /* QDCOUNT = 1 */
-    pos = 12;
-
-    name_len = dns_encode_name(host, pkt + pos, sizeof(pkt) - pos - 4);
-    if (name_len < 0) { close(fd); return -1; }
-    pos += (size_t)name_len;
-    pkt[pos++] = 0x00; pkt[pos++] = 0x01; /* QTYPE = A */
-    pkt[pos++] = 0x00; pkt[pos++] = 0x01; /* QCLASS = IN */
-
-    if (sendto(fd, pkt, pos, 0,
-               (struct sockaddr *)&srv, sizeof(srv)) < 0) {
-        g_dns_step = 2; g_dns_errno = errno; close(fd); return -1;
-    }
-
-    n = recv(fd, resp, sizeof(resp), 0);
-    g_dns_n = (int)n;
-    if (n < 0) g_dns_errno = errno;
-    close(fd);
-    if (n < 12) { g_dns_step = 3; return -1; }
-
-    uint16_t ancount = (uint16_t)((resp[6] << 8) | resp[7]);
-    g_dns_ancount = ancount;
-    if (!ancount) { g_dns_step = 4; return -1; }
-
-    /* Skip header and question section */
-    pos = 12;
-    while (pos < (size_t)n) {
-        if (!resp[pos]) { pos++; break; }
-        if ((resp[pos] & 0xC0) == 0xC0) { pos += 2; break; }
-        /* Bounds-check the label length BEFORE the increment — a malformed
-           response with a 0xFF label byte near the end would otherwise walk
-           past `n`. */
-        if (pos + 1 + (size_t)resp[pos] >= (size_t)n) { g_dns_step = 5; return -1; }
-        pos += 1 + resp[pos];
-    }
-    if (pos + 4 > (size_t)n) { g_dns_step = 5; return -1; }
-    pos += 4; /* QTYPE + QCLASS */
-
-    /* Walk every answer RR; the CDN returns a CNAME chain, so skip
-       non-A records and return the first A (type 1, rdlen 4). */
-    for (int a = 0; a < ancount && pos < (size_t)n; a++) {
-        if ((resp[pos] & 0xC0) == 0xC0) {
-            pos += 2;
-        } else {
-            while (pos < (size_t)n && resp[pos]) {
-                if (pos + 1 + (size_t)resp[pos] >= (size_t)n) break;
-                pos += 1 + resp[pos];
-            }
-            pos++;
-        }
-        if (pos + 10 > (size_t)n) break;
-
-        uint16_t type  = (uint16_t)((resp[pos] << 8) | resp[pos + 1]); pos += 2;
-        pos += 6; /* CLASS + TTL */
-        uint16_t rdlen = (uint16_t)((resp[pos] << 8) | resp[pos + 1]); pos += 2;
-
-        if (type == 1 && rdlen == 4 && pos + 4 <= (size_t)n) {
-            snprintf(ip_out, ip_sz, "%u.%u.%u.%u",
-                     resp[pos], resp[pos + 1], resp[pos + 2], resp[pos + 3]);
-            return 0;
-        }
-        pos += rdlen; /* skip this RR's data (e.g. a CNAME target) */
-    }
-
-    g_dns_step = 6; /* no A record among the answers */
-    return -1;
-}
-
-/* Cache resolved IPs by host. The batch fetch hits the same CDN host dozens
-   of times; a burst of identical raw-UDP queries gets dropped/rate-limited,
-   so resolve once (with retries) and reuse. */
-static pthread_mutex_t dns_cache_mtx = PTHREAD_MUTEX_INITIALIZER;
-static struct { char host[256]; char ip[INET_ADDRSTRLEN]; } dns_cache[64];
-static int dns_cache_n;
-
-static int
-dns_lookup(const char *host, char *ip_out, size_t ip_sz) {
-    int rc = -1;
-
-    pthread_mutex_lock(&dns_cache_mtx);
-    for (int i = 0; i < dns_cache_n; i++) {
-        if (!strcmp(dns_cache[i].host, host)) {
-            strncpy(ip_out, dns_cache[i].ip, ip_sz - 1);
-            ip_out[ip_sz - 1] = '\0';
-            pthread_mutex_unlock(&dns_cache_mtx);
-            return 0;
-        }
-    }
-    /* Cold miss: resolve while HOLDING the cache lock (single-flight). N pool
-       workers needing the same CDN host would otherwise each blast Sony's
-       rate-limited resolver; this way one resolves and the rest get the cache.
-       It also serializes dns_resolve so its diagnostic globals can't be raced.
-       (This is the DNS lock, independent of the pool lock.) */
-    for (int attempt = 0; attempt < 4 && rc; attempt++)
-        rc = dns_resolve(host, ip_out, ip_sz);
-    if (!rc && dns_cache_n < (int)(sizeof(dns_cache) / sizeof(dns_cache[0]))) {
-        strncpy(dns_cache[dns_cache_n].host, host,
-                sizeof(dns_cache[0].host) - 1);
-        strncpy(dns_cache[dns_cache_n].ip, ip_out,
-                sizeof(dns_cache[0].ip) - 1);
-        dns_cache_n++;
-    }
-    pthread_mutex_unlock(&dns_cache_mtx);
-    return rc;
-}
-
 /* ---------- HTTP GET via curl ------------------------------------------- */
 
 static size_t
@@ -330,8 +196,7 @@ int
 patchdl_http_get(const char *url, patchdl_buf_t *out) {
     CURL             *curl;
     CURLcode          res;
-    char              host[256], ip[INET_ADDRSTRLEN];
-    char              resolve_str[512];
+    char              host[256];
     struct curl_slist *resolve_list = NULL;
     struct curl_blob  ca_blob;
 
@@ -342,15 +207,7 @@ patchdl_http_get(const char *url, patchdl_buf_t *out) {
     if (url_host(url, host, sizeof(host))) { set_last("bad_url", 0, 0); return -1; }
     if (!host_allowed(host)) { set_last("host_not_allowed", 0, 0); return -1; }
     if (plain && strcasecmp(host, PLAIN_HTTP_HOST)) { set_last("http_not_allowed", 0, 0); return -1; }
-    if (dns_lookup(host, ip, sizeof(ip))) { set_last("dns", 0, 0); return -1; }
-
-    snprintf(resolve_str, sizeof(resolve_str), "%s:443:%s", host, ip);
-    resolve_list = curl_slist_append(NULL, resolve_str);
-
-    /* Also cover port 80 in case a redirect lands there */
-    char resolve_80[512];
-    snprintf(resolve_80, sizeof(resolve_80), "%s:80:%s", host, ip);
-    resolve_list = curl_slist_append(resolve_list, resolve_80);
+    if (!(resolve_list = resolve_list_for(host))) { set_last("dns", 0, 0); return -1; }
 
     {
         size_t caller_max = out->max;
@@ -392,11 +249,13 @@ patchdl_http_get(const char *url, patchdl_buf_t *out) {
 
     res = curl_easy_perform(curl);
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    note_curl_result(curl, host, res);
     curl_easy_cleanup(curl);
     curl_slist_free_all(resolve_list);
 
     if (res != CURLE_OK) {
-        set_last(res == CURLE_PEER_FAILED_VERIFICATION ||
+        set_last(res == CURLE_COULDNT_CONNECT ? "connect" :
+                 res == CURLE_PEER_FAILED_VERIFICATION ||
                  res == CURLE_SSL_CONNECT_ERROR ? "tls"
                  : res == CURLE_UNSUPPORTED_PROTOCOL ? "redirect"
                  : res == CURLE_OPERATION_TIMEDOUT ? "timeout" : "network",
@@ -422,16 +281,12 @@ http_external(const char *url, const char *method,
 #else
     CURL             *curl;
     CURLcode          res;
-    char              host[256], ip[INET_ADDRSTRLEN];
-    char              resolve_str[512];
+    char              host[256];
     struct curl_slist *resolve_list = NULL;
     struct curl_slist *headers      = NULL;
 
     if (url_host(url, host, sizeof(host))) return -1;
-    if (dns_lookup(host, ip, sizeof(ip))) return -1;
-
-    snprintf(resolve_str, sizeof(resolve_str), "%s:443:%s", host, ip);
-    resolve_list = curl_slist_append(NULL, resolve_str);
+    if (!(resolve_list = resolve_list_for(host))) return -1;
 
     {
         size_t caller_max = out->max;
@@ -469,6 +324,7 @@ http_external(const char *url, const char *method,
     }
 
     res = curl_easy_perform(curl);
+    note_curl_result(curl, host, res);
     curl_easy_cleanup(curl);
     curl_slist_free_all(resolve_list);
     curl_slist_free_all(headers);
@@ -557,7 +413,7 @@ http_download_to_file_progress(const char *url, FILE *fp, long long *bytes_out,
                                long long range_start) {
     CURL             *curl;
     CURLcode          res;
-    char              host[256], ip[INET_ADDRSTRLEN], rs443[512], rs80[512];
+    char              host[256];
     char              range_hdr[48];
     long              http_code = 0;
     struct curl_slist *rl = NULL;
@@ -569,18 +425,13 @@ http_download_to_file_progress(const char *url, FILE *fp, long long *bytes_out,
     if (bytes_out) *bytes_out = 0;
     if (url_host(url, host, sizeof(host))) return -1;
     if (!host_allowed(host)) return -1;
-    if (dns_lookup(host, ip, sizeof(ip))) return -1;
+    if (!(rl = resolve_list_for(host))) return -1;
 
     if (verify) {
         sink.md = EVP_MD_CTX_new();
         if (sink.md)
             EVP_DigestInit_ex(sink.md, digest_for(expected_sha256_hex), NULL);
     }
-
-    snprintf(rs443, sizeof(rs443), "%s:443:%s", host, ip);
-    rl = curl_slist_append(NULL, rs443);
-    snprintf(rs80, sizeof(rs80), "%s:80:%s", host, ip);
-    rl = curl_slist_append(rl, rs80);
 
     ca_blob.data  = (void *)PATCHDL_SCEI_DNAS_ROOT_PEM;
     ca_blob.len   = strlen(PATCHDL_SCEI_DNAS_ROOT_PEM);
@@ -628,6 +479,7 @@ http_download_to_file_progress(const char *url, FILE *fp, long long *bytes_out,
     res = curl_easy_perform(curl);
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
     curl_easy_getinfo(curl, CURLINFO_SIZE_DOWNLOAD_T, &dl);
+    note_curl_result(curl, host, res);
     curl_easy_cleanup(curl);
     curl_slist_free_all(rl);
 
@@ -982,7 +834,7 @@ patchdl_http_download_piece(const char *url, int fd,
     CURL             *curl;
     CURLcode          res;
     long              http_code = 0;
-    char              host[256], ip[INET_ADDRSTRLEN], rs443[512], rs80[512];
+    char              host[256];
     struct curl_slist *rl = NULL;
     struct curl_blob  ca_blob;
     piece_sink_t      sink;
@@ -993,7 +845,7 @@ patchdl_http_download_piece(const char *url, int fd,
 
     if (url_host(url, host, sizeof(host))) return -1;
     if (!host_allowed(host)) return -1;
-    if (dns_lookup(host, ip, sizeof(ip))) return -1;
+    if (!(rl = resolve_list_for(host))) return -1;
 
     memset(&sink, 0, sizeof(sink));
     sink.fd         = fd;
@@ -1003,11 +855,6 @@ patchdl_http_download_piece(const char *url, int fd,
         sink.md = EVP_MD_CTX_new();
         if (sink.md) EVP_DigestInit_ex(sink.md, digest_for(expected_sha256_or_null), NULL);
     }
-
-    snprintf(rs443, sizeof(rs443), "%s:443:%s", host, ip);
-    rl = curl_slist_append(NULL, rs443);
-    snprintf(rs80, sizeof(rs80), "%s:80:%s", host, ip);
-    rl = curl_slist_append(rl, rs80);
 
     ca_blob.data  = (void *)PATCHDL_SCEI_DNAS_ROOT_PEM;
     ca_blob.len   = strlen(PATCHDL_SCEI_DNAS_ROOT_PEM);
@@ -1046,6 +893,7 @@ patchdl_http_download_piece(const char *url, int fd,
 
     res = curl_easy_perform(curl);
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    note_curl_result(curl, host, res);
     curl_easy_cleanup(curl);
     curl_slist_free_all(rl);
 
@@ -1209,26 +1057,31 @@ patchdl_fetch_manifest(const char *manifest_url, patchdl_manifest_t *out) {
 
 void
 patchdl_net_diag(const char *url, char *out_json, size_t sz) {
-    char     host[256] = {0}, ip[INET_ADDRSTRLEN] = {0};
-    int      hostrc, allowrc, dnsrc;
-    long     http_code = 0;
-    CURLcode res = CURLE_OK;
-    int      did_curl = 0;
+    char                 host[256] = {0};
+    int                  hostrc, allowrc, dnsrc = -1;
+    long                 http_code = 0;
+    CURLcode             res = CURLE_OK;
+    int                  did_curl = 0;
+    patchdl_dns_answer_t a;
 
+    memset(&a, 0, sizeof a);
     hostrc  = url_host(url, host, sizeof(host));
     allowrc = (hostrc == 0) ? host_allowed(host) : 0;
-    dnsrc   = (hostrc == 0) ? dns_resolve(host, ip, sizeof(ip)) : -1;
+    if (hostrc == 0) {
+        patchdl_dns_forget(host);
+        dnsrc = patchdl_dns_lookup(host, &a);
+    }
 
     if (hostrc == 0 && allowrc && dnsrc == 0) {
         patchdl_buf_t buf;
         memset(&buf, 0, sizeof(buf));
         CURL *curl = curl_easy_init();
         if (curl) {
-            char rs[512];
+            char rs[PATCHDL_DNS_ENTRY_MAX];
             struct curl_slist *rl;
             struct curl_blob ca_blob;
-            snprintf(rs, sizeof(rs), "%s:443:%s", host, ip);
-            rl = curl_slist_append(NULL, rs);
+            rl = patchdl_dns_resolve_entry(&a, host, 443, rs, sizeof rs)
+                 ? NULL : curl_slist_append(NULL, rs);
             ca_blob.data = (void *)PATCHDL_SCEI_DNAS_ROOT_PEM;
             ca_blob.len = strlen(PATCHDL_SCEI_DNAS_ROOT_PEM);
             ca_blob.flags = CURL_BLOB_COPY;
@@ -1253,13 +1106,13 @@ patchdl_net_diag(const char *url, char *out_json, size_t sz) {
         }
     }
 
+    /* host, source and trail are plain ASCII from our own resolver; quotes
+       can't occur in them. */
     snprintf(out_json, sz,
              "{\"host\":\"%s\",\"host_ok\":%d,\"allowed\":%d,"
-             "\"dns_rc\":%d,\"ip\":\"%s\","
-             "\"dns_step\":%d,\"dns_errno\":%d,\"dns_recv\":%d,\"dns_ancount\":%d,"
+             "\"dns_rc\":%d,\"ip\":\"%s\",\"dns_source\":\"%s\",\"dns_trail\":\"%s\","
              "\"curl_ran\":%d,\"curl_rc\":%d,\"curl_err\":\"%s\",\"http_code\":%ld}",
-             host, hostrc == 0, allowrc, dnsrc, ip,
-             g_dns_step, g_dns_errno, g_dns_n, g_dns_ancount,
+             host, hostrc == 0, allowrc, dnsrc, a.n ? a.ip[0] : "", a.source, a.trail,
              did_curl, (int)res,
              did_curl ? curl_easy_strerror(res) : "n/a", http_code);
 }
@@ -1271,12 +1124,6 @@ patchdl_http_get(const char *url, patchdl_buf_t *out) {
     (void)url;
     (void)out;
     return -1; /* curl not available in this build; set CURL_DIR= to enable */
-}
-
-int
-patchdl_resolve_host(const char *host, char *ip_out, size_t ip_sz) {
-    (void)host; (void)ip_out; (void)ip_sz;
-    return -1;
 }
 
 void
