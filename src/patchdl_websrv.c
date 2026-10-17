@@ -196,7 +196,21 @@ typedef struct {
     pc_state_t state;
     int        attempts;
     int        slot;       /* worker slot while INFLIGHT, else -1 */
+    long       retry_at;   /* mono_ms() before which a failed piece waits */
 } dl_pstate_t;
+
+/* A piece that fails on the network is tried again after a growing pause,
+   so a dropped connection or a stalled CDN edge for a few minutes doesn't
+   end the download. Hash mismatches fail at once. */
+#define PIECE_MAX_ATTEMPTS 8
+static long
+piece_backoff_ms(int attempts) {
+    static const long steps[] = { 5000, 10000, 20000, 40000, 60000 };
+    int i = attempts - 1;
+    if (i < 0) i = 0;
+    if (i > 4) i = 4;
+    return steps[i];
+}
 
 typedef enum {
     JOB_QUEUED = 0, JOB_ADMITTING, JOB_ACTIVE, JOB_PAUSING, JOB_CANCELLING,
@@ -1745,11 +1759,39 @@ seed_from_sidecar(dl_job_t *job) {
 /* ---------- pool scheduler + workers ------------------------------------ */
 
 static int
-pick_pending_piece(const dl_job_t *job) {
-    /* pieces are stored in ascending offset order -> first PENDING is lowest */
+pick_pending_piece(const dl_job_t *job, long now) {
+    /* pieces are stored in ascending offset order -> first PENDING is lowest;
+       a piece waiting out its retry pause is skipped */
     for (int i = 0; i < job->mf.count; i++)
-        if (job->ps[i].state == PC_PENDING) return i;
+        if (job->ps[i].state == PC_PENDING && job->ps[i].retry_at <= now) return i;
     return -1;
+}
+
+/* Milliseconds until the next pending piece may start (0 if one already
+   may), or -1 when no piece is pending. Takes the same `now` as
+   pick_pending_piece, so a pause ending in between can't look like "nothing
+   left". Pool lock held. */
+static long
+next_retry_in_ms(const dl_job_t *job, long now) {
+    long best = -1;
+    for (int i = 0; i < job->mf.count; i++)
+        if (job->ps[i].state == PC_PENDING) {
+            long in = job->ps[i].retry_at > now ? job->ps[i].retry_at - now : 0;
+            if (best < 0 || in < best) best = in;
+        }
+    return best;
+}
+
+/* Wait on the pool condition, but no longer than ms (ms < 0: no limit). */
+static void
+pool_wait_locked(long ms) {
+    struct timespec ts;
+    if (ms < 0) { pthread_cond_wait(&g_pool.cv, &g_pool.mtx); return; }
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec  += ms / 1000;
+    ts.tv_nsec += (ms % 1000) * 1000000L;
+    if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+    pthread_cond_timedwait(&g_pool.cv, &g_pool.mtx, &ts);
 }
 
 /* Unlink a job from the list and free it. Pool lock held. */
@@ -2140,10 +2182,12 @@ dl_worker(void *arg) {
                 continue;
             }
             if (job->state == JOB_ACTIVE) {
-                pidx = pick_pending_piece(job);
+                long now = mono_ms(), wait;
+                pidx = pick_pending_piece(job, now);
                 if (pidx >= 0) break;                 /* claim below */
-                if (job->inflight == 0) { settle_active_locked(job); pthread_cond_broadcast(&g_pool.cv); continue; }
-                pthread_cond_wait(&g_pool.cv, &g_pool.mtx);
+                wait = next_retry_in_ms(job, now);
+                if (job->inflight == 0 && wait < 0) { settle_active_locked(job); pthread_cond_broadcast(&g_pool.cv); continue; }
+                pool_wait_locked(wait);               /* wakes for a retry pause ending, too */
                 continue;
             }
             if (job->state == JOB_PAUSING || job->state == JOB_CANCELLING) {
@@ -2213,8 +2257,12 @@ dl_worker(void *arg) {
             job->ps[pidx].state = PC_FAILED; job->pieces_failed++; job->rc = -2;
         } else {
             job->ps[pidx].attempts++;
-            if (job->ps[pidx].attempts < 4) job->ps[pidx].state = PC_PENDING;
-            else { job->ps[pidx].state = PC_FAILED; job->pieces_failed++; job->rc = -1; }
+            if (job->ps[pidx].attempts < PIECE_MAX_ATTEMPTS) {
+                job->ps[pidx].state    = PC_PENDING;
+                job->ps[pidx].retry_at = mono_ms() + piece_backoff_ms(job->ps[pidx].attempts);
+            } else {
+                job->ps[pidx].state = PC_FAILED; job->pieces_failed++; job->rc = -1;
+            }
         }
         pthread_cond_broadcast(&g_pool.cv);
         pthread_mutex_unlock(&g_pool.mtx);
@@ -2642,7 +2690,7 @@ append_dns(jbuf_t *j, const char *host) {
 
     memset(&a, 0, sizeof a);
     if (host[0]) {
-        patchdl_dns_forget(host);
+        patchdl_dns_refresh(host);
         patchdl_dns_lookup(host, &a);
     }
     for (int i = 0; i < a.n; i++) {

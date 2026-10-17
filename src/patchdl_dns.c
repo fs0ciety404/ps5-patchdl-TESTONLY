@@ -41,6 +41,12 @@
 #define DOH_TIMEOUT_S    4L
 #define POSITIVE_TTL_S   600     /* CDN edges rotate; ask again after 10 min */
 #define NEGATIVE_TTL_S   20      /* don't run the whole chain for every piece */
+/* patchdl_dns_forget leaves an answer alone while it is this fresh: many
+   workers stalling one after another must not refresh it over and over.
+   An answer that took long to get (blocked plain DNS) is kept longer. */
+#define FORGET_MIN_AGE_S       15
+#define FORGET_MIN_AGE_SLOW_S  120
+#define SLOW_LOOKUP_MS         3000
 #define CACHE_SLOTS      32
 #define MAX_SAVED        32
 
@@ -524,6 +530,8 @@ typedef struct {
     int                  inflight;
     time_t               expires;
     time_t               used;
+    time_t               fetched;
+    int                  slow;     /* the lookup took > SLOW_LOOKUP_MS */
 } cache_slot_t;
 
 static pthread_mutex_t g_mtx = PTHREAD_MUTEX_INITIALIZER;
@@ -590,7 +598,9 @@ patchdl_dns_lookup(const char *host, patchdl_dns_answer_t *out) {
     pthread_mutex_unlock(&g_mtx);
 
     memset(&fresh, 0, sizeof fresh);
+    long long t0 = now_ms();
     rc = resolve_fresh(host, &fresh);
+    long long took = now_ms() - t0;
     if (!rc && strcmp(fresh.source, "saved")) saved_put(host, &fresh);
 
     pthread_mutex_lock(&g_mtx);
@@ -599,6 +609,8 @@ patchdl_dns_lookup(const char *host, patchdl_dns_answer_t *out) {
         s->ok       = !rc;
         s->expires  = now_s() + (rc ? NEGATIVE_TTL_S : POSITIVE_TTL_S);
         s->used     = now_s();
+        s->fetched  = now_s();
+        s->slow     = took > SLOW_LOOKUP_MS;
         s->inflight = 0;
         pthread_cond_broadcast(&g_cv);
     }
@@ -611,19 +623,36 @@ void
 patchdl_dns_forget(const char *host) {
     cache_slot_t *s;
     pthread_mutex_lock(&g_mtx);
+    if ((s = slot_find(host)) && !s->inflight && s->ok &&
+        now_s() - s->fetched >= (s->slow ? FORGET_MIN_AGE_SLOW_S : FORGET_MIN_AGE_S))
+        s->expires = 0;
+    pthread_mutex_unlock(&g_mtx);
+}
+
+void
+patchdl_dns_refresh(const char *host) {
+    cache_slot_t *s;
+    pthread_mutex_lock(&g_mtx);
     if ((s = slot_find(host)) && !s->inflight) s->expires = 0;
     pthread_mutex_unlock(&g_mtx);
 }
 
+unsigned
+patchdl_dns_rotation(void) {
+    static unsigned turn;
+    return __atomic_fetch_add(&turn, 1, __ATOMIC_RELAXED);
+}
+
 int
 patchdl_dns_resolve_entry(const patchdl_dns_answer_t *a, const char *host,
-                          int port, char *out, size_t sz) {
-    size_t len;
-    int    k = snprintf(out, sz, "%s:%d:", host, port);
+                          int port, unsigned rotation, char *out, size_t sz) {
+    unsigned first = a->n ? rotation % (unsigned)a->n : 0;
+    size_t   len;
+    int      k = snprintf(out, sz, "%s:%d:", host, port);
     if (k < 0 || (size_t)k >= sz) return -1;
     for (int i = 0; i < a->n; i++) {
         len = strlen(out);
-        k = snprintf(out + len, sz - len, "%s%s", i ? "," : "", a->ip[i]);
+        k = snprintf(out + len, sz - len, "%s%s", i ? "," : "", a->ip[(first + (unsigned)i) % (unsigned)a->n]);
         if (k < 0 || (size_t)k >= sz - len) return -1;
     }
     return 0;

@@ -39,14 +39,25 @@ typedef struct {
    a short while. 0 on success, -1 if every source failed. */
 int  patchdl_dns_lookup(const char *host, patchdl_dns_answer_t *out);
 
-/* Drop host's cached answer, e.g. after none of its addresses accepted a
-   connection, so the next lookup asks again. */
+/* Drop host's cached answer after its addresses refused or stalled a
+   connection, so the next lookup asks again. An answer only seconds old is
+   kept (minutes if it was slow to get), so many workers failing one after
+   another trigger one new lookup, not one each. */
 void patchdl_dns_forget(const char *host);
+
+/* Drop host's cached answer unconditionally (diagnostics). */
+void patchdl_dns_refresh(const char *host);
+
+/* A new starting point for patchdl_dns_resolve_entry, once per request:
+   parallel connections and retries then spread over the CDN edges instead
+   of all trying the first address. */
+unsigned patchdl_dns_rotation(void);
 
 /* Room for any entry: a 255-character host, port and every address. */
 #define PATCHDL_DNS_ENTRY_MAX (256 + 8 + PATCHDL_DNS_MAX_IPS * 16)
 
-/* "host:port:ip1,ip2,..." for CURLOPT_RESOLVE. curl moves on to the next
-   address when one doesn't connect. -1 if it doesn't fit in sz. */
+/* "host:port:ip1,ip2,..." for CURLOPT_RESOLVE, starting at address
+   rotation % n. curl moves on to the next address when one doesn't connect.
+   -1 if it doesn't fit in sz. */
 int  patchdl_dns_resolve_entry(const patchdl_dns_answer_t *a, const char *host,
-                               int port, char *out, size_t sz);
+                               int port, unsigned rotation, char *out, size_t sz);

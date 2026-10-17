@@ -115,12 +115,13 @@ resolve_list_for(const char *host) {
     patchdl_dns_answer_t a;
     char                 entry[PATCHDL_DNS_ENTRY_MAX];
     struct curl_slist   *rl, *both;
+    unsigned             turn = patchdl_dns_rotation();
 
     if (patchdl_dns_lookup(host, &a) ||
-        patchdl_dns_resolve_entry(&a, host, 443, entry, sizeof entry) ||
+        patchdl_dns_resolve_entry(&a, host, 443, turn, entry, sizeof entry) ||
         !(rl = curl_slist_append(NULL, entry)))
         return NULL;
-    if (patchdl_dns_resolve_entry(&a, host, 80, entry, sizeof entry) ||
+    if (patchdl_dns_resolve_entry(&a, host, 80, turn, entry, sizeof entry) ||
         !(both = curl_slist_append(rl, entry))) {
         curl_slist_free_all(rl);
         return NULL;
@@ -128,17 +129,16 @@ resolve_list_for(const char *host) {
     return both;
 }
 
-/* None of the host's addresses took the connection (refused, or silently
-   dropped until the timeout): the next request asks DNS again instead of
-   reusing the cached answer. A timeout on an established transfer says
-   nothing about the addresses. Call before curl_easy_cleanup. */
+/* The host's addresses refused, dropped or stalled the connection: the next
+   request asks DNS again instead of reusing the cached answer, so a CDN edge
+   that stopped serving this console is left behind. Includes a transfer that
+   stalled mid-way (low-speed timeout): the edges rotate within seconds, and
+   a fresh answer usually names other ones. */
 static void
-note_curl_result(CURL *curl, const char *host, CURLcode res) {
-    curl_off_t connect_us = 0;
-    if (res == CURLE_OPERATION_TIMEDOUT)
-        curl_easy_getinfo(curl, CURLINFO_CONNECT_TIME_T, &connect_us);
+note_curl_result(const char *host, CURLcode res) {
     if (res == CURLE_COULDNT_CONNECT || res == CURLE_COULDNT_RESOLVE_HOST ||
-        (res == CURLE_OPERATION_TIMEDOUT && connect_us == 0))
+        res == CURLE_OPERATION_TIMEDOUT || res == CURLE_RECV_ERROR ||
+        res == CURLE_SEND_ERROR || res == CURLE_GOT_NOTHING)
         patchdl_dns_forget(host);
 }
 
@@ -249,7 +249,7 @@ patchdl_http_get(const char *url, patchdl_buf_t *out) {
 
     res = curl_easy_perform(curl);
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-    note_curl_result(curl, host, res);
+    note_curl_result(host, res);
     curl_easy_cleanup(curl);
     curl_slist_free_all(resolve_list);
 
@@ -324,7 +324,7 @@ http_external(const char *url, const char *method,
     }
 
     res = curl_easy_perform(curl);
-    note_curl_result(curl, host, res);
+    note_curl_result(host, res);
     curl_easy_cleanup(curl);
     curl_slist_free_all(resolve_list);
     curl_slist_free_all(headers);
@@ -479,7 +479,7 @@ http_download_to_file_progress(const char *url, FILE *fp, long long *bytes_out,
     res = curl_easy_perform(curl);
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
     curl_easy_getinfo(curl, CURLINFO_SIZE_DOWNLOAD_T, &dl);
-    note_curl_result(curl, host, res);
+    note_curl_result(host, res);
     curl_easy_cleanup(curl);
     curl_slist_free_all(rl);
 
@@ -893,7 +893,7 @@ patchdl_http_download_piece(const char *url, int fd,
 
     res = curl_easy_perform(curl);
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-    note_curl_result(curl, host, res);
+    note_curl_result(host, res);
     curl_easy_cleanup(curl);
     curl_slist_free_all(rl);
 
@@ -1068,7 +1068,7 @@ patchdl_net_diag(const char *url, char *out_json, size_t sz) {
     hostrc  = url_host(url, host, sizeof(host));
     allowrc = (hostrc == 0) ? host_allowed(host) : 0;
     if (hostrc == 0) {
-        patchdl_dns_forget(host);
+        patchdl_dns_refresh(host);
         dnsrc = patchdl_dns_lookup(host, &a);
     }
 
@@ -1080,7 +1080,7 @@ patchdl_net_diag(const char *url, char *out_json, size_t sz) {
             char rs[PATCHDL_DNS_ENTRY_MAX];
             struct curl_slist *rl;
             struct curl_blob ca_blob;
-            rl = patchdl_dns_resolve_entry(&a, host, 443, rs, sizeof rs)
+            rl = patchdl_dns_resolve_entry(&a, host, 443, 0, rs, sizeof rs)
                  ? NULL : curl_slist_append(NULL, rs);
             ca_blob.data = (void *)PATCHDL_SCEI_DNAS_ROOT_PEM;
             ca_blob.len = strlen(PATCHDL_SCEI_DNAS_ROOT_PEM);
