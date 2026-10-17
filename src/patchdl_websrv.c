@@ -197,6 +197,7 @@ typedef struct {
     int        attempts;
     int        slot;       /* worker slot while INFLIGHT, else -1 */
     long       retry_at;   /* mono_ms() before which a failed piece waits */
+    long long  have;       /* bytes of a failed piece already on disk, to resume */
 } dl_pstate_t;
 
 /* A piece that fails on the network is tried again after a growing pause,
@@ -1279,9 +1280,14 @@ build_downloads_json(void) {
     for (dl_job_t *job = g_pool.jobs; job; job = job->next) {
         long long bytes = job->done_bytes, total = job->total;
         int progress;
-        if (job == g_pool.active)
+        if (job == g_pool.active) {
             for (int s = 0; s < g_pool.n_workers; s++)
                 bytes += g_pool.inflight_bytes[s];
+            /* parts of failed pieces waiting to be continued */
+            if (job->ps)
+                for (int i = 0; i < job->mf.count; i++)
+                    if (job->ps[i].state == PC_PENDING) bytes += job->ps[i].have;
+        }
         if (job->verifying) bytes = job->verify_bytes;
         if (total > 0) {
             progress = (int)((bytes * 100) / total);
@@ -2166,7 +2172,7 @@ dl_worker(void *arg) {
         dl_job_t *job;
         int       pidx = -1;
         char      url[768], hash[80];
-        long long off = 0, sz = 0;
+        long long off = 0, sz = 0, have = 0, written = 0;
         unsigned int my_seq = 0;
         int       fd = -1, verify = 0, rc;
         volatile int *abort_ptr = NULL;
@@ -2228,7 +2234,8 @@ dl_worker(void *arg) {
         abort_ptr = &job->abort;
         snprintf(url, sizeof url, "%s", job->mf.pieces[pidx].url);
         snprintf(hash, sizeof hash, "%s", job->mf.pieces[pidx].hash);
-        g_pool.inflight_bytes[slot] = 0;
+        have      = job->ps[pidx].have;
+        g_pool.inflight_bytes[slot] = have;
         pthread_mutex_unlock(&g_pool.mtx);
 
         /* ---- download the piece, NO lock ---- */
@@ -2236,12 +2243,13 @@ dl_worker(void *arg) {
         long last_http_code = 0;
         {
             patchdl_piece_ctx_t ctx = { &g_pool.inflight_bytes[slot], abort_ptr };
-            rc = patchdl_http_download_piece(url, fd, off, sz,
+            rc = patchdl_http_download_piece(url, fd, off, sz, have,
                                              verify && hash[0] ? hash : NULL, &ctx,
                                              &last_curl_rc, &last_http_code);
         }
 
         pthread_mutex_lock(&g_pool.mtx);
+        written = g_pool.inflight_bytes[slot];
         g_pool.inflight_bytes[slot] = 0;
         job->inflight--;
         if (rc != 0) {
@@ -2265,9 +2273,24 @@ dl_worker(void *arg) {
         } else if (job->abort &&
                    (job->state == JOB_PAUSING || job->state == JOB_CANCELLING)) {
             job->ps[pidx].state = PC_PENDING;   /* aborted by pause -> redo on resume */
+        } else if (rc == -2 && have > 0) {
+            /* a continued piece failed its hash: the kept part may be what
+               is wrong, so fetch the whole piece once more before calling
+               the package corrupt */
+            job->ps[pidx].have     = 0;
+            job->ps[pidx].state    = PC_PENDING;
+            job->ps[pidx].retry_at = 0;
         } else if (rc == -2) {
             job->ps[pidx].state = PC_FAILED; job->pieces_failed++; job->rc = -2;
+        } else if (rc == -3) {
+            /* the server can't continue where the piece stopped: start it
+               over right away, without spending an attempt */
+            job->ps[pidx].have     = 0;
+            job->ps[pidx].state    = PC_PENDING;
+            job->ps[pidx].retry_at = 0;
         } else {
+            /* keep what arrived so the next try continues there */
+            job->ps[pidx].have = written > 0 && written < sz ? written : 0;
             job->ps[pidx].attempts++;
             if (job->ps[pidx].attempts < PIECE_MAX_ATTEMPTS) {
                 job->ps[pidx].state    = PC_PENDING;

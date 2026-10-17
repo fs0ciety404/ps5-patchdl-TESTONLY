@@ -340,7 +340,8 @@ async function openDiag(titleId) {
     diagRow(Boolean(mf && mf.ok), t("diag.manifest"), mfDetail),
   ];
   if (job) rows.push(diagRow(job.state !== "error", t("diag.lastDownload"),
-    job.state === "error" ? (job.fail_step ? failStepText(job) : t("diag.failedPieces"))
+    job.state === "error" ? (Number(job.rc) === -3 ? noSpaceText(job.need_bytes, job.free_bytes)
+      : job.fail_step ? failStepText(job) : t("diag.failedPieces"))
       : tCode("diag.jobState.", job.state, job.state)));
 
   const report = [

@@ -280,10 +280,13 @@ http_get_once(const char *url, patchdl_buf_t *out) {
     curl_slist_free_all(resolve_list);
 
     if (res != CURLE_OK) {
+        /* only "connect", "timeout" and "network" are worth another try */
         set_last(res == CURLE_COULDNT_CONNECT ? "connect" :
                  res == CURLE_PEER_FAILED_VERIFICATION ||
                  res == CURLE_SSL_CONNECT_ERROR ? "tls"
-                 : res == CURLE_UNSUPPORTED_PROTOCOL ? "redirect"
+                 : res == CURLE_UNSUPPORTED_PROTOCOL ||
+                   res == CURLE_TOO_MANY_REDIRECTS ? "redirect"
+                 : res == CURLE_WRITE_ERROR ? "bad_manifest"   /* over the size cap */
                  : res == CURLE_OPERATION_TIMEDOUT ? "timeout" : "network",
                  (int)res, http_code);
         free(out->data);
@@ -820,14 +823,57 @@ void patchdl_net_global_cleanup(void) { curl_global_cleanup(); }
 
 /* Write sink for one piece: pwrite at a fixed base offset (concurrent
    non-overlapping pieces of the same fd are safe), tee into SHA-256 if asked,
-   and publish bytes-so-far for live progress. */
+   and publish bytes-so-far for live progress. A resumed piece starts at
+   `resume` bytes; see piece_header_cb and piece_write_cb for how a server
+   that ignores the range is handled. */
 typedef struct {
     int                 fd;
     long long           base;
     long long           written;
+    long long           size;         /* the piece's length: never write past it */
+    long long           resume;       /* bytes of the piece already on disk */
+    long long           range_start;  /* from Content-Range, -1 if none */
+    int                 checked;      /* first body bytes seen */
+    int                 bad_range;    /* the server sent a different range */
+    CURL               *curl;
     EVP_MD_CTX         *md;
+    const EVP_MD       *md_type;
     volatile long long *bytes_slot;
 } piece_sink_t;
+
+/* Feed [offset, offset+size) of fd into md. 0 on success, -1 on a read
+   error, -2 when *abort was set (pause or cancel) on the way. */
+static int
+digest_fd_region(EVP_MD_CTX *md, int fd, long long offset, long long size,
+                 volatile int *abort) {
+    const size_t   CHUNK = 1u << 20;
+    unsigned char *buf = malloc(CHUNK);
+    if (!buf) return -1;
+    while (size > 0) {
+        size_t  want = size > (long long)CHUNK ? CHUNK : (size_t)size;
+        ssize_t got;
+        if (abort && *abort) { free(buf); return -2; }
+        got = pread(fd, buf, want, (off_t)offset);
+        if (got <= 0) { free(buf); return -1; }
+        EVP_DigestUpdate(md, buf, (size_t)got);
+        offset += got; size -= got;
+    }
+    free(buf);
+    return 0;
+}
+
+static size_t
+piece_header_cb(char *b, size_t size, size_t nitems, void *ud) {
+    piece_sink_t *s = (piece_sink_t *)ud;
+    size_t        n = size * nitems;
+    long long     start;
+    /* A redirect's headers come first; only the last response counts. */
+    if (n > 5 && !strncmp(b, "HTTP/", 5)) s->range_start = -1;
+    if (n > 20 && !strncasecmp(b, "Content-Range:", 14) &&
+        sscanf(b + 14, " bytes %lld-", &start) == 1)
+        s->range_start = start;
+    return n;
+}
 
 static size_t
 piece_write_cb(void *ptr, size_t size, size_t nmemb, void *ud) {
@@ -835,6 +881,21 @@ piece_write_cb(void *ptr, size_t size, size_t nmemb, void *ud) {
     size_t        n = size * nmemb;
     ssize_t       w;
     if (n == 0) return 0;
+    if (s->resume && !s->checked) {
+        long code = 0;
+        s->checked = 1;
+        curl_easy_getinfo(s->curl, CURLINFO_RESPONSE_CODE, &code);
+        if (code != 206) {
+            /* the server sent the whole piece: start it over in place */
+            s->written = 0;
+            if (s->md) EVP_DigestInit_ex(s->md, s->md_type, NULL);
+        } else if (s->range_start != s->resume) {
+            s->bad_range = 1;
+            return 0;                         /* not where we left off */
+        }
+    }
+    /* more than the piece holds would land in the next piece's bytes */
+    if (s->size > 0 && s->written + (long long)n > s->size) return 0;
     w = pwrite(s->fd, ptr, n, (off_t)(s->base + s->written));
     if (w < 0 || (size_t)w != n) return 0;   /* short write -> curl errors out */
     if (s->md) EVP_DigestUpdate(s->md, ptr, n);
@@ -854,6 +915,7 @@ piece_xfer_cb(void *clientp, curl_off_t dltotal, curl_off_t dlnow,
 int
 patchdl_http_download_piece(const char *url, int fd,
                             long long file_offset, long long file_size,
+                            long long resume_from,
                             const char *expected_sha256_or_null,
                             patchdl_piece_ctx_t *ctx,
                             int *curl_rc_out, long *http_code_out) {
@@ -873,13 +935,35 @@ patchdl_http_download_piece(const char *url, int fd,
     if (!host_allowed(host)) return -1;
     if (!(rl = resolve_list_for(host))) return -1;
 
+    if (resume_from < 0 || file_size <= 0 || resume_from >= file_size) resume_from = 0;
     memset(&sink, 0, sizeof(sink));
-    sink.fd         = fd;
-    sink.base       = file_offset;
-    sink.bytes_slot = ctx ? ctx->bytes_slot : NULL;
+    sink.fd          = fd;
+    sink.base        = file_offset;
+    sink.size        = file_size;
+    sink.resume      = resume_from;
+    sink.written     = resume_from;
+    sink.range_start = -1;
+    sink.bytes_slot  = ctx ? ctx->bytes_slot : NULL;
+    if (sink.bytes_slot) *sink.bytes_slot = resume_from;
     if (verify) {
+        sink.md_type = digest_for(expected_sha256_or_null);
         sink.md = EVP_MD_CTX_new();
-        if (sink.md) EVP_DigestInit_ex(sink.md, digest_for(expected_sha256_or_null), NULL);
+        if (sink.md) EVP_DigestInit_ex(sink.md, sink.md_type, NULL);
+        /* the part already on disk goes into the hash first */
+        if (sink.md && resume_from) {
+            int drc = digest_fd_region(sink.md, fd, file_offset, resume_from,
+                                       ctx ? ctx->abort : NULL);
+            if (drc == -2) {                /* paused or cancelled meanwhile */
+                EVP_MD_CTX_free(sink.md);
+                curl_slist_free_all(rl);
+                return -1;
+            }
+            if (drc) {                      /* unreadable: fetch it all again */
+                EVP_DigestInit_ex(sink.md, sink.md_type, NULL);
+                sink.resume = sink.written = 0;
+                if (sink.bytes_slot) *sink.bytes_slot = 0;
+            }
+        }
     }
 
     ca_blob.data  = (void *)PATCHDL_SCEI_DNAS_ROOT_PEM;
@@ -895,8 +979,16 @@ patchdl_http_download_piece(const char *url, int fd,
 
     curl_easy_setopt(curl, CURLOPT_URL,             url);
     curl_easy_setopt(curl, CURLOPT_RESOLVE,         rl);
+    sink.curl = curl;
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,   piece_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA,       &sink);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION,  piece_header_cb);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA,      &sink);
+    if (sink.resume) {
+        char range[48];
+        snprintf(range, sizeof range, "%lld-%lld", sink.resume, file_size - 1);
+        curl_easy_setopt(curl, CURLOPT_RANGE, range);
+    }
     curl_easy_setopt(curl, CURLOPT_CAINFO_BLOB,     &ca_blob);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER,  1L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST,  2L);
@@ -928,7 +1020,8 @@ patchdl_http_download_piece(const char *url, int fd,
 
     if (res != CURLE_OK) {
         if (sink.md) EVP_MD_CTX_free(sink.md);
-        return -1;                          /* network error / abort */
+        /* -3: the server can't continue where this piece stopped */
+        return sink.bad_range || http_code == 416 ? -3 : -1;
     }
     if (file_size > 0 && sink.written != file_size) {
         if (sink.md) EVP_MD_CTX_free(sink.md);

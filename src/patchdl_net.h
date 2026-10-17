@@ -76,12 +76,17 @@ typedef struct {
 } patchdl_piece_ctx_t;
 
 /* Download one whole piece and pwrite it into `fd` at `file_offset`. Concurrent
-   non-overlapping pieces of the same fd are safe. Returns 0 on success (and
-   fdatasyncs fd), -1 on network/IO/abort, -2 on a SHA-256 mismatch.
+   non-overlapping pieces of the same fd are safe. With resume_from > 0 the
+   first resume_from bytes are already on disk and only the rest is asked
+   for (a server that sends the whole piece anyway just overwrites it).
+   Returns 0 on success (and fdatasyncs fd), -1 on network/IO/abort (the
+   bytes written so far are in *ctx->bytes_slot), -2 on a SHA-256 mismatch,
+   -3 when the server can't continue at resume_from (start the piece over).
    `curl_rc_out`/`http_code_out` (either may be NULL) receive the last libcurl
    CURLcode + HTTP status for failure diagnosis. */
 int patchdl_http_download_piece(const char *url, int fd,
                                 long long file_offset, long long file_size,
+                                long long resume_from,
                                 const char *expected_sha256_or_null,
                                 patchdl_piece_ctx_t *ctx,
                                 int *curl_rc_out, long *http_code_out);
