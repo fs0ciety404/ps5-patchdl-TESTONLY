@@ -144,29 +144,21 @@ document.addEventListener("DOMContentLoaded", () => {
   window.addEventListener("hashchange", openDiagFromHash);
 });
 
-/* ---------------- other versions ---------------- */
+/* ---------------- dialogs ---------------- */
 
-// Every version Prospero (PS5) or Orbis (PS4) lists for a game. Versions
-// newer than the installed one that run on this console can be picked; the
-// guide then fetches the link for exactly that version.
-async function openVersions(titleId) {
-  const game = state.titles.find((g) => g.title_id === titleId);
-  if (!game) return;
+function icon(name) { return `<svg aria-hidden="true"><use href="#icon-${name}"></use></svg>`; }
+
+function closeButtonHtml() {
+  return `<button class="icon-button guide-close" type="button" aria-label="${escapeHtml(t("common.close"))}">${icon("close")}</button>`;
+}
+
+// Modal sheet: Escape, the close button and a click on the backdrop close
+// it, and focus goes back to where it was.
+function openSheet(html, labelledBy, extraClass = "") {
   const back = document.activeElement;
   const wrap = document.createElement("div");
   wrap.className = "guide-backdrop";
-  wrap.innerHTML = `
-    <section class="guide" role="dialog" aria-modal="true" aria-labelledby="verTitle">
-      <header class="guide-head">
-        <div>
-          <p class="eyebrow">${t("versions.title")}</p>
-          <h2 id="verTitle">${escapeHtml(game.name)}</h2>
-          <p class="guide-game">${escapeHtml(t("card.installed", { version: game.installed_version || "?" }))}</p>
-        </div>
-        <button class="icon-button guide-close" type="button" aria-label="${escapeHtml(t("common.close"))}">×</button>
-      </header>
-      <div class="diag-body"><p class="guide-why">${t("versions.loading")}</p></div>
-    </section>`;
+  wrap.innerHTML = `<section class="guide ${extraClass}" role="dialog" aria-modal="true" aria-labelledby="${labelledBy}">${html}</section>`;
   const close = () => {
     document.removeEventListener("keydown", onKey);
     wrap.remove();
@@ -178,27 +170,87 @@ async function openVersions(titleId) {
   document.addEventListener("keydown", onKey);
   document.body.appendChild(wrap);
   wrap.querySelector(".guide-close").focus();
+  return { wrap, close };
+}
+
+// The game's icon for a dialog header; initials until it has loaded.
+function coverHtml(game, cls) {
+  const src = game && game.has_icon ? `/api/icon/${encodeURIComponent(game.title_id)}` : "";
+  return `<div class="cover ${cls}" aria-hidden="true">${src
+    ? `<img src="${src}" alt="" onerror="this.replaceWith(document.createTextNode('${escapeHtml(initials(game.name))}'))">`
+    : escapeHtml(initials(game ? game.name : ""))}</div>`;
+}
+
+/* ---------------- other versions ---------------- */
+
+// Every version Prospero (PS5) or Orbis (PS4) lists for a game, grouped:
+// what can be picked here first, then what needs a newer firmware, the
+// installed one, and older ones folded away. Picking one opens the guide
+// for exactly that version.
+async function openVersions(titleId) {
+  const game = state.titles.find((g) => g.title_id === titleId);
+  if (!game) return;
+  const { wrap, close } = openSheet(`
+      <header class="guide-head">
+        <div class="sheet-title">
+          ${coverHtml(game, "cover-sm")}
+          <div>
+            <p class="eyebrow">${t("versions.title")}</p>
+            <h2 id="verTitle">${escapeHtml(game.name)}</h2>
+            <p class="guide-game">${escapeHtml(t("card.installed", { version: game.installed_version || "?" }))}</p>
+          </div>
+        </div>
+        ${closeButtonHtml()}
+      </header>
+      <div class="sheet-body"><div class="vskeleton" aria-busy="true"><i></i><i></i><i></i></div>
+        <p class="visually-hidden" role="status">${t("versions.loading")}</p></div>`, "verTitle", "is-sheet");
 
   const data = await fetchJson(`/api/versions?title=${encodeURIComponent(titleId)}`);
   if (!document.contains(wrap)) return;
-  const body = wrap.querySelector(".diag-body");
+  const body = wrap.querySelector(".sheet-body");
   if (!data || !data.ok) {
-    body.innerHTML = `<p class="guide-why">${t("versions.loadFailed")}</p>`;
+    body.innerHTML = `<div class="callout is-warn">${icon("alert")}<span>${t("versions.loadFailed")}</span></div>`;
     return;
   }
   const rows = (data.versions || []).slice().sort((a, b) => (a.version < b.version ? 1 : -1));
+  const group = (st) => rows.filter((r) => r.state === st);
+  const ok = group("ok"), locked = group("needs_fw"), installed = group("installed"), older = group("older");
+  // A locked row names the firmware in its badge already.
+  const meta = (r) => [r.size, !data.ps4 && r.fw && r.state !== "needs_fw" ? `FW ${r.fw}` : ""]
+    .filter(Boolean).map(escapeHtml).join(" · ");
+  const row = (r, extra) => `
+      <li class="vrow is-${r.state}">
+        <div class="vrow-main"><strong>${escapeHtml(r.version)}</strong>${meta(r) ? `<span>${meta(r)}</span>` : ""}</div>
+        ${extra}
+      </li>`;
+  const section = (title, list, render, cls = "") => list.length ? `
+      <section class="vgroup ${cls}">
+        <h3>${title} <span>${list.length}</span></h3>
+        <ul class="vlist">${list.map(render).join("")}</ul>
+      </section>` : "";
+
   body.innerHTML = `
-    <p class="guide-why">${t("versions.intro", { site: `<a href="${escapeHtml(data.page)}" target="_blank" rel="noopener">${escapeHtml(data.site)}</a>` })}</p>
-    <ul class="version-list">${rows.map((r) => `
-      <li class="version-row${r.state === "ok" ? "" : " is-off"}">
-        <span><strong>${escapeHtml(r.version)}</strong><br>
-          <em>${escapeHtml(r.size || "")}${!data.ps4 && r.fw ? ` · FW ${escapeHtml(r.fw)}` : ""}${r.state !== "ok" ? ` · ${escapeHtml(tCode("versions.state.", r.state, r.state))}` : ""}</em></span>
-        ${r.state === "ok" ? `<button type="button" class="row-button is-update" data-pick="${escapeHtml(r.version)}" data-size="${escapeHtml(r.size || "")}">${t("versions.get")}</button>` : ""}
-      </li>`).join("") || `<li class="storage-empty">${t("versions.none")}</li>`}</ul>`;
+    ${ok.length
+      ? `<p class="guide-why">${t("versions.pickHint")}</p>`
+      : `<div class="callout">${icon("check")}<span>${rows.length ? t("versions.noneNewer") : t("versions.none")}</span></div>`}
+    ${section(t("versions.available"), ok, (r) => row(r,
+      `<button type="button" class="row-button is-update" data-pick="${escapeHtml(r.version)}" data-size="${escapeHtml(r.size || "")}">${icon("download")}${t("versions.get")}</button>`))}
+    ${section(t("versions.needsFwGroup"), locked, (r) => row(r,
+      `<span class="vbadge is-warn">${icon("lock")}${t("card.needsFw", { fw: escapeHtml(r.fw || "?") })}</span>`))}
+    ${installed.length ? `<ul class="vlist vcurrent">${installed.map((r) => row(r,
+      `<span class="vbadge is-ok">${icon("check")}${t("versions.installedGroup")}</span>`)).join("")}</ul>` : ""}
+    ${older.length ? `
+      <details class="vgroup volder">
+        <summary>${icon("chevron")}${t("versions.olderGroup", { count: older.length })}</summary>
+        <ul class="vlist">${older.map((r) => row(r, "")).join("")}</ul>
+      </details>` : ""}
+    <p class="sheet-source">${t("versions.source", { site: `<a href="${escapeHtml(data.page)}" target="_blank" rel="noopener">${escapeHtml(data.site)}${icon("external")}</a>` })}</p>`;
   body.querySelectorAll("[data-pick]").forEach((btn) => btn.addEventListener("click", () => {
     close();
     openGuide(game, false, pickFor(game, btn.dataset.pick, btn.dataset.size));
   }));
+  const first = body.querySelector("[data-pick]");
+  if (first) first.focus();
 }
 
 /* ---------------- download diagnosis ---------------- */
@@ -239,32 +291,19 @@ function diagRow(ok, label, detail) {
 async function openDiag(titleId) {
   const game = state.titles.find((g) => g.title_id === titleId);
   const name = game ? game.name : titleId;
-  const back = document.activeElement;
-  const wrap = document.createElement("div");
-  wrap.className = "guide-backdrop";
-  wrap.innerHTML = `
-    <section class="guide" role="dialog" aria-modal="true" aria-labelledby="diagTitle">
+  const { wrap } = openSheet(`
       <header class="guide-head">
-        <div>
-          <p class="eyebrow">${t("diag.eyebrow")}</p>
-          <h2 id="diagTitle">${escapeHtml(name)}</h2>
-          <p class="guide-game">${escapeHtml(titleId)}</p>
+        <div class="sheet-title">
+          ${coverHtml(game, "cover-sm")}
+          <div>
+            <p class="eyebrow">${t("diag.eyebrow")}</p>
+            <h2 id="diagTitle">${escapeHtml(name)}</h2>
+            <p class="guide-game">${escapeHtml(titleId)}</p>
+          </div>
         </div>
-        <button class="icon-button guide-close" type="button" aria-label="${escapeHtml(t("common.close"))}">×</button>
+        ${closeButtonHtml()}
       </header>
-      <div class="diag-body"><p class="guide-why">${t("diag.checking")}</p></div>
-    </section>`;
-  const close = () => {
-    document.removeEventListener("keydown", onKey);
-    wrap.remove();
-    if (back && document.contains(back)) back.focus();
-  };
-  const onKey = (e) => { if (e.key === "Escape") close(); };
-  wrap.querySelector(".guide-close").addEventListener("click", close);
-  wrap.addEventListener("click", (e) => { if (e.target === wrap) close(); });
-  document.addEventListener("keydown", onKey);
-  document.body.appendChild(wrap);
-  wrap.querySelector(".guide-close").focus();
+      <div class="diag-body"><p class="guide-why">${t("diag.checking")}</p></div>`, "diagTitle");
 
   const [check, status, downloads, pkg, inst] = await Promise.all([
     fetchJson(`/api/netcheck?title=${encodeURIComponent(titleId)}`),
@@ -328,37 +367,21 @@ const DONATE_URL = "https://paypal.me/oliverkoester";
 // Donation dialog. On the TV a link is no use, so it shows a QR code for
 // the phone (hidden on phones, where the button opens PayPal directly).
 function openDonate() {
-  const back = document.activeElement;
   const matrix = qrEncode(DONATE_URL);
-  const wrap = document.createElement("div");
-  wrap.className = "guide-backdrop";
-  wrap.innerHTML = `
-    <section class="guide" role="dialog" aria-modal="true" aria-labelledby="donateTitle">
+  openSheet(`
       <header class="guide-head">
         <div>
           <p class="eyebrow">${t("donate.eyebrow")}</p>
           <h2 id="donateTitle">${t("donate.title")}</h2>
         </div>
-        <button class="icon-button guide-close" type="button" aria-label="${escapeHtml(t("common.close"))}">×</button>
+        ${closeButtonHtml()}
       </header>
       <p class="guide-why">${t("donate.why")}</p>
       ${matrix ? `<div class="guide-qr">${qrSvg(matrix)}<div>
         <span>${t("donate.scan")}</span>
         <code>${escapeHtml(DONATE_URL)}</code></div></div>` : ""}
       <a class="row-button is-update donate-open" href="${DONATE_URL}" target="_blank" rel="noopener">${t("donate.open")}</a>
-      <p class="guide-why"><small>${escapeHtml(t("donate.small"))}</small></p>
-    </section>`;
-  const close = () => {
-    document.removeEventListener("keydown", onKey);
-    wrap.remove();
-    if (back && document.contains(back)) back.focus();
-  };
-  const onKey = (e) => { if (e.key === "Escape") close(); };
-  wrap.querySelector(".guide-close").addEventListener("click", close);
-  wrap.addEventListener("click", (e) => { if (e.target === wrap) close(); });
-  document.addEventListener("keydown", onKey);
-  document.body.appendChild(wrap);
-  wrap.querySelector(".guide-close").focus();
+      <p class="guide-why"><small>${escapeHtml(t("donate.small"))}</small></p>`, "donateTitle");
 }
 
 // The server rescans on its own when games are added or removed and bumps
@@ -729,20 +752,18 @@ function createGameCard(game) {
   body.className = "card-body";
   body.innerHTML = `
     <h3>${escapeHtml(game.name)}</h3>
-    <div class="subline">
-      <span>${escapeHtml(game.title_id)}</span>
-      <span>${escapeHtml(game.content_id || "")}</span>
-    </div>
     <div class="pills">
+      <span class="tid" title="${escapeHtml(game.content_id || "")}">${escapeHtml(game.title_id)}</span>
+      ${isPs4(game) ? `<span class="pill">PS4</span>` : ""}
       ${game.downloading && game._jobState === "queued" ? `<span class="pill">${t("pill.queued")}</span>` : ""}
       ${game.downloading && game._jobState !== "queued" ? `<span class="pill live">${t("pill.downloading")}</span>` : ""}
       ${game.resumable && !game.downloading ? `<span class="pill warn">${t("pill.paused")}</span>` : ""}
       ${statusPill(game)}
       ${sourcePill(game)}
-      ${isPs4(game) ? `<span class="pill">PS4</span>` : ""}
       ${game.sideloaded ? `<span class="pill warn" title="${escapeHtml(t("pill.sideloadedTitle"))}">${t("pill.sideloaded")}</span>` : ""}
     </div>
-    <div class="versions">${versionsHtml(game)}</div>
+    ${versionTrackHtml(game)}
+    ${cardNotesHtml(game)}
   `;
 
   const actions = document.createElement("div");
@@ -757,6 +778,14 @@ function createGameCard(game) {
     else btn.addEventListener("click", () => runTitleAction(game.title_id, act.action));
     actions.appendChild(btn);
   });
+  if (canPickVersion(game, "99") && !game.manual_version && game.status !== "blocked") {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "row-button is-ghost";
+    btn.dataset.versions = game.title_id;
+    btn.innerHTML = `${icon("layers")}<span>${t("versions.title")}</span>`;
+    actions.appendChild(btn);
+  }
 
   row.append(lead, body, actions);
   card.appendChild(row);
@@ -851,37 +880,44 @@ function stopButton(game) {
 
 // Installed -> what PatchDL can get for this console -> newest overall with
 // the firmware it needs (left out when it's the same as the offered update).
-function versionsHtml(game) {
-  const v = (x) => `<b>${escapeHtml(x)}</b>`;
-  const parts = [`<span>${t("card.installed", { version: v(game.installed_version || "--") })}</span>`];
+function versionTrackHtml(game) {
+  const step = (label, version, note, cls = "") => `
+    <div class="vstep ${cls}"><span>${label}</span><b>${escapeHtml(version)}</b>${note ? `<em>${note}</em>` : ""}</div>`;
+  const parts = [step(t("card.lblInstalled"), game.installed_version || "--", "")];
   let offered = "";
   if (game.manual_version) {
     offered = game.manual_version;
-    parts.push(`<span>${t("card.updateFrom", { version: v(offered), site: isPs4(game) ? "Orbis" : "Prospero" })}</span>`);
+    parts.push(step(t("card.lblUpdate"), offered, "", "is-target"));
   } else if (game.status === "available" && game.compatible_version) {
     offered = game.compatible_version;
-    parts.push(`<span>${t("card.update", { version: v(offered) })}</span>`);
+    parts.push(step(t("card.lblUpdate"), offered, "", "is-target"));
   } else if (hasOlderPatch(game)) {
     offered = game.prospero_version;
-    const fw = game.prospero_required_fw ? ` · ${t("card.needsFw", { fw: escapeHtml(game.prospero_required_fw) })}` : "";
-    parts.push(`<span class="prospero-line">${t("card.update", { version: v(offered) })}${fw} · <a href="https://prosperopatches.com/${encodeURIComponent(game.title_id)}" target="_blank" rel="noopener">Prospero</a></span>`);
-  } else if (game.status === "incompatible_fw" && !game.prospero_done) {
-    parts.push(`<span>${t("card.lookingForPatch")}</span>`);
+    parts.push(step(t("card.lblUpdate"), offered,
+      game.prospero_required_fw ? t("card.needsFw", { fw: escapeHtml(game.prospero_required_fw) }) : "", "is-target"));
   }
+  if (game.latest_version && game.latest_version !== offered && game.latest_version !== game.installed_version)
+    parts.push(step(t("card.lblNewest"), game.latest_version,
+      game.latest_required_fw ? t("card.needsFw", { fw: escapeHtml(game.latest_required_fw) }) : "", "is-dim"));
+  const arrow = `<span class="vtrack-arrow">${icon("arrow")}</span>`;
+  // The arrow only leads to something PatchDL can get.
+  return `<div class="vtrack">${offered ? parts[0] + arrow + parts.slice(1).join("") : parts.join("")}</div>`;
+}
+
+// Problems and hints under the versions, each with what to do about it.
+function cardNotesHtml(game) {
+  const notes = [];
   const job = state.downloads.find((d) => d.title_id === game.title_id);
   if (job && job.state === "error" && Number(job.rc) === -3)
-    parts.push(`<span class="card-note is-warn">${escapeHtml(noSpaceText(job.need_bytes, job.free_bytes))}</span>`);
+    notes.push(`<div class="callout is-warn">${icon("alert")}<span>${escapeHtml(noSpaceText(job.need_bytes, job.free_bytes))}</span></div>`);
   else if (job && job.state === "error")
-    parts.push(`<span class="card-note is-warn">${escapeHtml(t("card.downloadFailed"))} ${job.fail_step ? escapeHtml(failStepText(job)) + " " : ""}<button type="button" class="link-button" data-diag="${escapeHtml(game.title_id)}">${t("card.details")}</button></span>`);
-  if (game.latest_version && game.latest_version !== offered) {
-    const fw = game.latest_required_fw ? ` · ${t("card.needsFw", { fw: escapeHtml(game.latest_required_fw) })}` : "";
-    parts.push(`<span>${t("card.newest", { version: v(game.latest_version) })}${fw}</span>`);
-  }
-  if (canPickVersion(game, "99") && !game.manual_version && game.status !== "blocked")
-    parts.push(`<span><button type="button" class="link-button" data-versions="${escapeHtml(game.title_id)}">${t("versions.title")}</button></span>`);
+    notes.push(`<div class="callout is-warn">${icon("alert")}<span>${escapeHtml(t("card.downloadFailed"))}${job.fail_step ? " " + escapeHtml(failStepText(job)) : ""}</span>
+      <button type="button" class="link-button" data-diag="${escapeHtml(game.title_id)}">${t("card.details")}</button></div>`);
+  if (!game.manual_version && !hasOlderPatch(game) && game.status === "incompatible_fw" && !game.prospero_done)
+    notes.push(`<div class="callout is-quiet"><span class="spinner" aria-hidden="true"></span><span>${t("card.lookingForPatch")}</span></div>`);
   if (game.sideloaded)
-    parts.push(`<span class="card-note is-warn">${escapeHtml(t("card.sideloadedNote"))}</span>`);
-  return parts.join("");
+    notes.push(`<div class="callout is-warn">${icon("alert")}<span>${escapeHtml(t("card.sideloadedNote"))}</span></div>`);
+  return notes.join("");
 }
 
 function statusPill(game) {
@@ -899,9 +935,12 @@ function statusPill(game) {
   return `<span class="pill">${t("pill.noInfo")}</span>`;
 }
 
+// Official installs are the normal case and need no badge; every other
+// source gets one.
 function sourcePill(game) {
   const info = sourceInfo(game);
   const type = SOURCE_TYPES[sourceType(game)] ? sourceType(game) : "unknown";
+  if (type === "official") return "";
   return `<span class="pill ${info.className}">${escapeHtml(sourceLabel(type))}</span>`;
 }
 function sourceInfo(game) { return SOURCE_TYPES[sourceType(game)] || SOURCE_TYPES.unknown; }
@@ -1047,10 +1086,12 @@ function reconcileFromJobs(jobs) {
 // Why the package list (manifest) couldn't be fetched, in words.
 function failStepText(j) {
   const http = Number(j.last_http_code) || 0;
-  const key = `failstep.${j.fail_step}`;
-  return j.fail_step && j.fail_step !== "unknown" && tHas(key)
+  // "connect": DNS answered, but no address took the connection.
+  const step = j.fail_step === "connect" ? "network" : j.fail_step;
+  const key = `failstep.${step}`;
+  return step && step !== "unknown" && tHas(key)
     ? t(key, { http })
-    : t("failstep.unknown", { step: j.fail_step });
+    : t("failstep.unknown", { step });
 }
 
 function startInstallPolling() {
@@ -1216,7 +1257,8 @@ function renderGlobalStatus() {
 
   // Eyebrow + name
   els.globalDlState.textContent = !isActive ? t("dl.queued") : active.verifying ? t("dl.verifying") : t("dl.downloading");
-  els.globalDlName.textContent  = active.name || active.title_id || "—";
+  const activeGame = state.titles.find((g) => g.title_id === active.title_id);
+  els.globalDlName.textContent  = active.name || (activeGame && activeGame.name) || active.title_id || "—";
 
   // Position chip ("3 of 9") only when there's more than one game in this run
   if (total > 1) {
@@ -1920,7 +1962,7 @@ function openGuide(game, fromLink = false, pick = null) {
           <h2 id="guideTitle">${t("guide.title", { version: ver })}</h2>
           <p class="guide-game">${escapeHtml(game.name)}</p>
         </div>
-        <button class="icon-button guide-close" type="button" aria-label="${escapeHtml(t("common.close"))}">×</button>
+        ${closeButtonHtml()}
       </header>`;
 
   let body;
