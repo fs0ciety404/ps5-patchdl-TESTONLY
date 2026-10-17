@@ -133,6 +133,20 @@ svg {
 }
 .donate-row .row-button { width: auto; padding: 0 16px; }
 .diag-body { display: grid; gap: 14px; }
+.version-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; max-height: 52vh; overflow-y: auto; }
+.version-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+.version-row em { color: var(--muted); font-style: normal; font-size: 13px; }
+.version-row.is-off { opacity: 0.55; }
+.version-row .row-button { width: auto; padding: 0 18px; }
 .diag-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
 .diag-row { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 8px; align-items: start; }
 .diag-row > b { font-size: 16px; }

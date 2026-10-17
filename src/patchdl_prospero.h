@@ -25,3 +25,19 @@ typedef struct {
    data, nothing breaks. */
 int patchdl_prospero_query(const char *title_id, uint32_t fw_bin,
                            patchdl_prospero_result_t *out);
+
+/* One patch version as Prospero Patches (PS5) or Orbis Patches (PS4) lists it. */
+typedef struct {
+    char     version[16];      /* "01.003.000" (PS5) or "01.07" (PS4) */
+    char     required_fw[16];  /* display form; for PS4 a PS4 firmware */
+    char     size[16];         /* the site's label, e.g. "8.7GB" */
+    uint32_t fw_bin;           /* PS5 firmware it needs, 0 for PS4 */
+} patchdl_patch_version_t;
+
+/* Base URL of the site that lists this title's patches. */
+const char *patchdl_patchsite_base(const char *title_id);
+
+/* Every version the site lists for title_id, newest first as the site
+   orders them. 0 on success with *count entries (up to max). */
+int patchdl_patchsite_versions(const char *title_id, patchdl_patch_version_t *out,
+                               int max, int *count);

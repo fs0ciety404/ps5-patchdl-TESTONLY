@@ -127,9 +127,74 @@ document.addEventListener("DOMContentLoaded", () => {
   document.addEventListener("click", (e) => {
     const b = e.target.closest("[data-diag]");
     if (b) openDiag(b.dataset.diag);
+    const v = e.target.closest("[data-versions]");
+    if (v) openVersions(v.dataset.versions);
   });
   window.addEventListener("hashchange", openDiagFromHash);
 });
+
+/* ---------------- other versions ---------------- */
+
+const VERSION_STATE_TEXT = {
+  installed: "installed",
+  older: "older than installed",
+  needs_fw: "needs a newer firmware",
+};
+
+// Every version Prospero (PS5) or Orbis (PS4) lists for a game. Versions
+// newer than the installed one that run on this console can be picked; the
+// guide then fetches the link for exactly that version.
+async function openVersions(titleId) {
+  const game = state.titles.find((g) => g.title_id === titleId);
+  if (!game) return;
+  const back = document.activeElement;
+  const wrap = document.createElement("div");
+  wrap.className = "guide-backdrop";
+  wrap.innerHTML = `
+    <section class="guide" role="dialog" aria-modal="true" aria-labelledby="verTitle">
+      <header class="guide-head">
+        <div>
+          <p class="eyebrow">Other versions</p>
+          <h2 id="verTitle">${escapeHtml(game.name)}</h2>
+          <p class="guide-game">Installed ${escapeHtml(game.installed_version || "?")}</p>
+        </div>
+        <button class="icon-button guide-close" type="button" aria-label="Close">×</button>
+      </header>
+      <div class="diag-body"><p class="guide-why">Loading the version list…</p></div>
+    </section>`;
+  const close = () => {
+    document.removeEventListener("keydown", onKey);
+    wrap.remove();
+    if (back && document.contains(back)) back.focus();
+  };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  wrap.querySelector(".guide-close").addEventListener("click", close);
+  wrap.addEventListener("click", (e) => { if (e.target === wrap) close(); });
+  document.addEventListener("keydown", onKey);
+  document.body.appendChild(wrap);
+  wrap.querySelector(".guide-close").focus();
+
+  const data = await fetchJson(`/api/versions?title=${encodeURIComponent(titleId)}`);
+  if (!document.contains(wrap)) return;
+  const body = wrap.querySelector(".diag-body");
+  if (!data || !data.ok) {
+    body.innerHTML = `<p class="guide-why">The version list couldn't be loaded. Try again in a moment.</p>`;
+    return;
+  }
+  const rows = (data.versions || []).slice().sort((a, b) => (a.version < b.version ? 1 : -1));
+  body.innerHTML = `
+    <p class="guide-why">From <a href="${escapeHtml(data.page)}" target="_blank" rel="noopener">${escapeHtml(data.site)}</a>. Pick a version to get it straight from Sony. Older versions than the installed one can't be installed over it.</p>
+    <ul class="version-list">${rows.map((r) => `
+      <li class="version-row${r.state === "ok" ? "" : " is-off"}">
+        <span><strong>${escapeHtml(r.version)}</strong><br>
+          <em>${escapeHtml(r.size || "")}${!data.ps4 && r.fw ? ` · FW ${escapeHtml(r.fw)}` : ""}${r.state !== "ok" ? ` · ${escapeHtml(VERSION_STATE_TEXT[r.state] || r.state)}` : ""}</em></span>
+        ${r.state === "ok" ? `<button type="button" class="row-button is-update" data-pick="${escapeHtml(r.version)}" data-size="${escapeHtml(r.size || "")}">Get</button>` : ""}
+      </li>`).join("") || `<li class="storage-empty">No versions listed.</li>`}</ul>`;
+  body.querySelectorAll("[data-pick]").forEach((btn) => btn.addEventListener("click", () => {
+    close();
+    openGuide(game, false, pickFor(game, btn.dataset.pick, btn.dataset.size));
+  }));
+}
 
 /* ---------------- download diagnosis ---------------- */
 
@@ -144,10 +209,11 @@ function diagLink(titleId) {
 }
 
 function openDiagFromHash() {
-  const m = location.hash.match(/^#diag\/([A-Za-z0-9_.-]+)$/);
+  const m = location.hash.match(/^#(diag|versions)\/([A-Za-z0-9_.-]+)$/);
   if (!m) return;
   history.replaceState(null, "", location.pathname + location.search);
-  openDiag(m[1]);
+  if (m[1] === "diag") openDiag(m[2]);
+  else openVersions(m[2]);
 }
 
 async function fetchJson(url) {
@@ -768,7 +834,7 @@ function versionsHtml(game) {
   let offered = "";
   if (game.manual_version) {
     offered = game.manual_version;
-    parts.push(`<span>Update ${v(offered)} · from Prospero</span>`);
+    parts.push(`<span>Update ${v(offered)} · from ${isPs4(game) ? "Orbis" : "Prospero"}</span>`);
   } else if (game.status === "available" && game.compatible_version) {
     offered = game.compatible_version;
     parts.push(`<span>Update ${v(offered)}</span>`);
@@ -788,6 +854,8 @@ function versionsHtml(game) {
     const fw = game.latest_required_fw ? ` · needs FW ${escapeHtml(game.latest_required_fw)}` : "";
     parts.push(`<span>Newest ${v(game.latest_version)}${fw}</span>`);
   }
+  if (canPickVersion(game, "99") && !game.manual_version && game.status !== "blocked")
+    parts.push(`<span><button type="button" class="link-button" data-versions="${escapeHtml(game.title_id)}">Other versions</button></span>`);
   if (game.sideloaded)
     parts.push(`<span class="card-note is-warn">Installed outside the Store. An update replaces this exact version, which some tools depend on. Switch on Updates only if you want that.</span>`);
   return parts.join("");
@@ -799,7 +867,8 @@ function statusPill(game) {
   if (game.status === "blocked" || !sourcePolicy(game).allow_install)
     return `<span class="pill">Not supported</span>`;
   if (game.patch_title_match === false) return `<span class="pill blocked">Title mismatch</span>`;
-  if (game.manual_version || hasOlderPatch(game)) return `<span class="pill prospero">Via Prospero</span>`;
+  if (game.manual_version || hasOlderPatch(game))
+    return `<span class="pill prospero">Via ${isPs4(game) ? "Orbis" : "Prospero"}</span>`;
   if (game.status === "available") return `<span class="pill ok">Update available</span>`;
   if (game.status === "incompatible_fw")
     return `<span class="pill">Newest needs FW ${escapeHtml(game.latest_required_fw || "?")}</span>`;
@@ -1745,8 +1814,26 @@ function qrSvg(matrix) {
 // human check, so the user copies one link and PatchDL does the rest. Copying
 // is awkward in the PS5 browser, hence the QR hand-off to a phone.
 
-const guide = { el: null, game: null, fromLink: false, started: false, busy: false,
+const guide = { el: null, game: null, pick: null, fromLink: false, started: false, busy: false,
                 lastUrl: "", timer: null, returnFocus: null, onKey: null };
+
+// The version the guide fetches: the older-firmware patch Prospero found, or
+// one the user picked under "Other versions" (Prospero for PS5, Orbis for PS4).
+function pickFor(game, version, size) {
+  const ps4 = isPs4(game);
+  const site = ps4 ? "Orbis Patches" : "Prospero Patches";
+  const page = `https://${ps4 ? "orbispatches.com" : "prosperopatches.com"}/${encodeURIComponent(game.title_id.slice(0, 9))}`;
+  if (version)
+    return { version, size: size || "", fw: "", site, page, ps4, chosen: true };
+  return { version: game.prospero_version, size: game.prospero_size || "",
+           fw: game.prospero_required_fw || "", site, page, ps4, chosen: false };
+}
+
+// No download or install in the way, and downloads allowed for this game.
+function canPickVersion(game, version) {
+  return !game.downloading && !game.downloaded && !game.resumable && !game.installing &&
+    isDownloadAllowed({ ...game, manual_version: version });
+}
 
 function canGetOlderPatch(game) {
   return hasOlderPatch(game) &&
@@ -1757,21 +1844,34 @@ function canGetOlderPatch(game) {
 
 // A link a phone can open. A page opened on the PS5 itself runs on 127.0.0.1,
 // so the server reports its LAN address for this.
-function phoneLink(game) {
+function phoneLink(game, pick) {
   const h = location.hostname;
   let base = location.origin;
   if (!h || h === "localhost" || h === "127.0.0.1" || h === "[::1]") {
     if (!state.status.lan_ip) return null;
     base = `http://${state.status.lan_ip}:${state.status.http_port || location.port || 12880}`;
   }
-  return `${base}/#get/${encodeURIComponent(game.title_id)}`;
+  const extra = pick && pick.chosen
+    ? `/${encodeURIComponent(pick.version)}/${encodeURIComponent(pick.size)}` : "";
+  return `${base}/#get/${encodeURIComponent(game.title_id)}${extra}`;
 }
 
 function openGuideFromHash() {
-  const m = location.hash.match(/^#get\/([A-Za-z0-9_.-]+)$/);
+  const m = location.hash.match(/^#get\/([A-Za-z0-9_.-]+)(?:\/([0-9.]+)\/([A-Za-z0-9. %]*))?$/);
   if (!m) return;
   const game = state.titles.find((g) => g.title_id === m[1]);
   if (!game) { showToast("That game is not installed on this PS5."); clearGuideHash(); return; }
+  if (m[2]) {
+    // a version picked under "Other versions" on the console
+    const pick = pickFor(game, m[2], decodeURIComponent(m[3] || ""));
+    if (!canPickVersion(game, pick.version)) {
+      showToast(`${game.name}: a download is already on its way.`);
+      clearGuideHash();
+      return;
+    }
+    openGuide(game, true, pick);
+    return;
+  }
   if (!canGetOlderPatch(game)) {
     showToast(game.manual_version || game.downloading || game.downloaded
       ? `${game.name}: the older patch is already on its way.`
@@ -1794,20 +1894,22 @@ function isConsoleBrowser() {
   return /PlayStation/i.test(navigator.userAgent) || h === "127.0.0.1" || h === "localhost";
 }
 
-function openGuide(game, fromLink = false) {
+function openGuide(game, fromLink = false, pick = null) {
   closeGuide();
-  Object.assign(guide, { game, fromLink, started: false, busy: false, lastUrl: "",
+  pick = pick || pickFor(game);
+  Object.assign(guide, { game, pick, fromLink, started: false, busy: false, lastUrl: "",
                          returnFocus: document.activeElement });
-  const ver = escapeHtml(game.prospero_version);
-  const size = game.prospero_size ? ` (${escapeHtml(game.prospero_size)})` : "";
+  const ver = escapeHtml(pick.version);
+  const size = pick.size ? ` (${escapeHtml(pick.size)})` : "";
+  const site = escapeHtml(pick.site);
   const onConsole = !fromLink && isConsoleBrowser();
-  const link = fromLink ? null : phoneLink(game);
+  const link = fromLink ? null : phoneLink(game, pick);
   const matrix = link ? qrEncode(link) : null;
 
   const head = `
       <header class="guide-head">
         <div>
-          <p class="eyebrow">Old FW patch</p>
+          <p class="eyebrow">${pick.chosen ? "Other version" : "Old FW patch"}</p>
           <h2 id="guideTitle">Get ${ver}</h2>
           <p class="guide-game">${escapeHtml(game.name)}</p>
         </div>
@@ -1831,24 +1933,31 @@ function openGuide(game, fromLink = false) {
            <code>${escapeHtml(link)}</code>
          </div></div>`
       : "";
+    const why = pick.chosen
+      ? `${site} lists version <b>${ver}</b>${size}. PatchDL downloads it from Sony once you hand over its link.`
+      : `Sony only offers ${escapeHtml(game.latest_version || "the newest patch")}, which needs FW ${escapeHtml(game.latest_required_fw || "?")}. Prospero Patches still lists <b>${ver}</b>, which runs on FW ${escapeHtml(pick.fw || "?")}.`;
+    const copyStep = pick.ps4
+      ? `<strong>Copy the links</strong>
+            <span>Press <b>Copy all links!</b> next to <i>Using download manager?</i> PatchDL needs any one of them.</span>`
+      : `<strong>Copy the SC link</strong>
+            <span>Under <b>Additional Files</b>, press and hold the <b>SC</b> button and choose <i>Copy Link</i>. PatchDL takes the full piece list from it.</span>`;
     body = `
-      <p class="guide-why">Sony only offers ${escapeHtml(game.latest_version || "the newest patch")}, which needs FW ${escapeHtml(game.latest_required_fw || "?")}. Prospero Patches still lists <b>${ver}</b>, which runs on FW ${escapeHtml(game.prospero_required_fw || "?")}.</p>
+      <p class="guide-why">${why}</p>
       ${handoff}
       <ol class="guide-steps">
         <li>
-          <div class="guide-step-text"><strong>Open Prospero Patches</strong>
+          <div class="guide-step-text"><strong>Open ${site}</strong>
             <span>Tap version <b>${ver}</b>${size}. If a human check shows up, confirm it.</span></div>
-          <a class="row-button is-update guide-open" href="https://prosperopatches.com/${encodeURIComponent(game.title_id)}" target="_blank" rel="noopener">Open Prospero</a>
+          <a class="row-button is-update guide-open" href="${escapeHtml(pick.page)}" target="_blank" rel="noopener">Open ${pick.ps4 ? "Orbis" : "Prospero"}</a>
         </li>
         <li>
-          <div class="guide-step-text"><strong>Copy the SC link</strong>
-            <span>Under <b>Additional Files</b>, press and hold the <b>SC</b> button and choose <i>Copy Link</i>. PatchDL takes the full piece list from it.</span></div>
+          <div class="guide-step-text">${copyStep}</div>
         </li>
         <li>
           <div class="guide-step-text"><strong>Paste it here</strong>
             <span>The download starts on your PS5 as soon as the link is in.</span></div>
           <div class="guide-paste">
-            <input class="guide-input" type="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://…_sc.pkg" aria-label="SC link">
+            <input class="guide-input" type="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="${pick.ps4 ? "http://…_0.pkg" : "https://…_sc.pkg"}" aria-label="Link">
             <button class="row-button guide-start" type="button">Start</button>
           </div>
           <div class="guide-status" role="status" aria-live="polite"></div>
@@ -1920,7 +2029,8 @@ function guideStatus(kind, message, action) {
 async function guideSubmit(url, force) {
   const game = guide.game;
   if (!game || guide.busy) return;
-  if (!url) { guideStatus("error", "Paste the SC link from Prospero first."); return; }
+  const pick = guide.pick;
+  if (!url) { guideStatus("error", pick.ps4 ? "Paste a link from Orbis first." : "Paste the SC link from Prospero first."); return; }
   guide.busy = true;
   guide.lastUrl = url;
   const start = guide.el.querySelector(".guide-start");
@@ -1928,7 +2038,7 @@ async function guideSubmit(url, force) {
   guideStatus("busy", "Checking the link on your PS5…");
   try {
     await postJson("/api/download_url", {
-      title_id: game.title_id, url, version: game.prospero_version, force,
+      title_id: game.title_id, url, version: pick.version, size: pick.size, force,
     });
   } catch (error) {
     guide.busy = false;
@@ -1939,19 +2049,19 @@ async function guideSubmit(url, force) {
       guideStatus("error", escapeHtml(noSpaceText(b.need_bytes, b.free_bytes)));
     } else if (b.reason === "size_mismatch") {
       guideStatus("warn",
-        `This link is ${formatBytes(b.found_bytes)} in ${Number(b.pieces) || "?"} pieces, but ${escapeHtml(game.prospero_version)} should be about ${escapeHtml(b.expected || "?")}. It is probably a different version.`,
+        `This link is ${formatBytes(b.found_bytes)} in ${Number(b.pieces) || "?"} pieces, but ${escapeHtml(pick.version)} should be about ${escapeHtml(b.expected || "?")}. It is probably a different version.`,
         { label: "Download anyway", run: () => guideSubmit(url, true) });
     } else {
       guideStatus("error", escapeHtml(reasonText(error)) + (b.detail ? ` (${escapeHtml(b.detail)})` : ""));
     }
-    state.logs.push(`[${timeNow()}] Prospero link for ${game.title_id} refused: ${reasonText(error)}`);
+    state.logs.push(`[${timeNow()}] ${pick.site} link for ${game.title_id} refused: ${reasonText(error)}`);
     renderLogs();
     return;
   }
   guide.busy = false;
-  manualDownloadStarted(game);
+  manualDownloadStarted(game, pick.version);
   if (!guide.fromLink) {
-    showToast(`${game.name}: download of ${game.prospero_version} started.`);
+    showToast(`${game.name}: download of ${pick.version} started.`);
     closeGuide();
     return;
   }
@@ -1961,8 +2071,8 @@ async function guideSubmit(url, force) {
 
 // Card state for a download that the server has accepted (from this page or
 // from a phone); the pool's job list takes over from here.
-function manualDownloadStarted(game) {
-  game.manual_version = game.prospero_version;
+function manualDownloadStarted(game, version) {
+  game.manual_version = version;
   game.downloading = true;
   game._localDownloading = true;
   game._localSince = Date.now();
@@ -1970,7 +2080,7 @@ function manualDownloadStarted(game) {
   state.downloads = state.downloads.filter((i) => i.title_id !== game.title_id);
   state.downloads.push({ title_id: game.title_id, name: game.name, version: game.manual_version,
                          state: "queued", progress: 0, bytes: 0, total_bytes: 0 });
-  state.logs.push(`[${timeNow()}] Download queued (Prospero): ${game.title_id} ${game.manual_version}`);
+  state.logs.push(`[${timeNow()}] Download queued (${isPs4(game) ? "Orbis" : "Prospero"}): ${game.title_id} ${game.manual_version}`);
   renderGames(); renderLogs();
   startDownloadPolling();
 }
@@ -1993,9 +2103,9 @@ async function guidePoll() {
     // Only a job that is actually running means a link arrived from elsewhere;
     // an old failed or paused entry does not.
     if (j.state !== "queued" && j.state !== "active") return;
-    manualDownloadStarted(game);
+    manualDownloadStarted(game, guide.pick.version);
     if (!guide.fromLink) {
-      showToast(`${game.name}: link received, download of ${game.prospero_version} started.`);
+      showToast(`${game.name}: link received, download of ${guide.pick.version} started.`);
       closeGuide();
       return;
     }

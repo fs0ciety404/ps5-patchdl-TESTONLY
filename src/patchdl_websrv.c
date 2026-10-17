@@ -2577,6 +2577,60 @@ url_host_of(const char *url, char *out, size_t sz) {
     if (n < sz) { memcpy(out, p, n); out[n] = '\0'; }
 }
 
+/* GET /api/versions?title=<id>: every patch version Prospero Patches (PS5)
+   or Orbis Patches (PS4) lists for the game, each marked whether it can be
+   picked here: newer than the installed version and, on PS5, runnable on
+   this firmware. Older versions are not offered (no downgrades). */
+static enum MHD_Result
+queue_versions(struct MHD_Connection *conn, const char *tid) {
+    patchdl_patch_version_t *list;
+    char                     inst[16] = "", tid9[16];
+    int                      n = 0, ps4;
+    jbuf_t                   j = {0};
+
+    if (!path_segment_safe(tid) || strlen(tid) < 9 || strlen(tid) >= 32)
+        return queue_text(conn, MHD_HTTP_FORBIDDEN, "forbidden");
+    snprintf(tid9, sizeof tid9, "%.9s", tid);
+    ps4 = !strncmp(tid9, "CUSA", 4);
+    pthread_mutex_lock(&g_mutex);
+    for (size_t i = 0; i < g_title_count; i++)
+        if (!strcmp(g_titles[i].title_id, tid)) {
+            snprintf(inst, sizeof inst, "%s", g_titles[i].installed_version);
+            break;
+        }
+    pthread_mutex_unlock(&g_mutex);
+
+    if (!(list = calloc(128, sizeof *list)))
+        return queue_text(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, "oom");
+    if (patchdl_patchsite_versions(tid9, list, 128, &n)) {
+        free(list);
+        return queue_json(conn, MHD_HTTP_BAD_GATEWAY,
+                          "{\"ok\":false,\"reason\":\"versions_unavailable\"}");
+    }
+    jbuf_append(&j, "{\"ok\":true,\"site\":");
+    jbuf_append_str(&j, ps4 ? "Orbis Patches" : "Prospero Patches");
+    jbuf_appendf(&j, ",\"page\":\"%s/%s\",\"ps4\":%s,\"installed\":",
+                 patchdl_patchsite_base(tid9), tid9, ps4 ? "true" : "false");
+    jbuf_append_str(&j, inst);
+    jbuf_append(&j, ",\"versions\":[");
+    for (int i = 0; i < n; i++) {
+        const char *state =
+            inst[0] && !strcmp(list[i].version, inst)  ? "installed"
+          : inst[0] && strcmp(list[i].version, inst) < 0 ? "older"
+          : !ps4 && list[i].fw_bin > g_fw.bin          ? "needs_fw"
+                                                       : "ok";
+        jbuf_append(&j, i ? ",{\"version\":" : "{\"version\":");
+        jbuf_append_str(&j, list[i].version);
+        jbuf_append(&j, ",\"fw\":");    jbuf_append_str(&j, list[i].required_fw);
+        jbuf_append(&j, ",\"size\":");  jbuf_append_str(&j, list[i].size);
+        jbuf_append(&j, ",\"state\":"); jbuf_append_str(&j, state);
+        jbuf_append(&j, "}");
+    }
+    jbuf_append(&j, "]}");
+    free(list);
+    return queue_json_owned(conn, MHD_HTTP_OK, j.buf);
+}
+
 /* GET /api/netcheck?title=<id>: walk one title's update chain the way a
    download does (update list, then the package manifest) and report each
    step with PatchDL's own DNS answer, so a report shows where it breaks. */
@@ -2782,6 +2836,7 @@ manifest_from_link(const char *tid, const char *in, char *canon, size_t sz) {
     char        tag[16];
     const char *p, *rest, *base, *stem_end = NULL;
     size_t      n = strlen(in);
+    int         ps4_piece = 0;
 
     /* The URL ends up unescaped in JSON sidecars and responses, and dot
        segments could walk the path into another title's folder. */
@@ -2798,6 +2853,17 @@ manifest_from_link(const char *tid, const char *in, char *canon, size_t sz) {
         size_t el = strlen(ends[i]);
         if (n > el && !strcmp(in + n - el, ends[i])) { stem_end = in + n - el; break; }
     }
+    /* PS4: Orbis Patches lists the pieces ("<name>_0.pkg", "_1.pkg", ...),
+       which sit in the same gs2 folder as the manifest "<name>.json". */
+    if (!stem_end && !strncmp(rest, "gs2.ww.prod.dl.playstation.net/", 31) &&
+        n > 5 && !strcmp(in + n - 4, ".pkg")) {
+        const char *d = in + n - 4;
+        while (d > in && isdigit((unsigned char)d[-1])) d--;
+        if (d < in + n - 4 && d > in && d[-1] == '_') {
+            stem_end = d - 1;
+            ps4_piece = 1;
+        }
+    }
     if (!stem_end)                  return "not_an_sc_link";
     base = strrchr(in, '/') + 1;    /* the scheme guarantees a '/' */
     if (stem_end <= base)           return "not_an_sc_link";
@@ -2809,10 +2875,12 @@ manifest_from_link(const char *tid, const char *in, char *canon, size_t sz) {
     tag[0] = '-';
     if (!strstr(base, tag))         return "url_title_mismatch";
 
-    /* Manifests are fetched over https with the pinned Sony root. */
+    /* PS5 manifests are fetched over https with the pinned Sony root; PS4
+       manifests only exist over plain http on gs2 (see PLAIN_HTTP_HOST). */
     if (sizeof("https://") - 1 + (size_t)(stem_end - rest) + sizeof(".json") > sz)
         return "url_too_long";
-    snprintf(canon, sz, "https://%.*s.json", (int)(stem_end - rest), rest);
+    snprintf(canon, sz, "%s%.*s.json", ps4_piece ? "http://" : "https://",
+             (int)(stem_end - rest), rest);
     return NULL;
 }
 
@@ -2821,23 +2889,30 @@ manifest_from_link(const char *tid, const char *in, char *canon, size_t sz) {
    for `ver`, i.e. the user most likely copied a link of another version.
    Versions of (nearly) equal size can't be told apart this way. */
 static int
-size_mismatch(const char *tid, const char *ver, long long found,
-              char *label, size_t lsz) {
+size_mismatch(const char *tid, const char *ver, const char *given_size,
+              long long found, char *label, size_t lsz) {
     char   lbl[16] = {0}, pver[16] = {0}, unit[8] = {0};
     double v, unit_bytes, expect, diff, tol;
 
-    pthread_mutex_lock(&g_mutex);
-    for (size_t i = 0; i < g_title_count; i++)
-        if (!strcmp(g_titles[i].title_id, tid)) {
-            memcpy(lbl, g_titles[i].prospero_size, sizeof lbl - 1);
-            memcpy(pver, g_titles[i].prospero_version, sizeof pver - 1);
-            break;
-        }
-    pthread_mutex_unlock(&g_mutex);
+    if (given_size && given_size[0]) {
+        /* the size the version list showed for the version picked */
+        snprintf(lbl, sizeof lbl, "%s", given_size);
+        snprintf(pver, sizeof pver, "%s", ver);
+    } else {
+        pthread_mutex_lock(&g_mutex);
+        for (size_t i = 0; i < g_title_count; i++)
+            if (!strcmp(g_titles[i].title_id, tid)) {
+                memcpy(lbl, g_titles[i].prospero_size, sizeof lbl - 1);
+                memcpy(pver, g_titles[i].prospero_version, sizeof pver - 1);
+                break;
+            }
+        pthread_mutex_unlock(&g_mutex);
+    }
     for (char *c = lbl; *c; c++)          /* external text, echoed into JSON */
         if (!isalnum((unsigned char)*c) && *c != '.' && *c != ' ') *c = '?';
     snprintf(label, lsz, "%s", lbl);
 
+    /* "8.7GB" (Orbis) and "71.7 GB" (Prospero) */
     if (strcmp(pver, ver) || sscanf(lbl, "%lf %7s", &v, unit) != 2) return 0;
     if (!strcmp(unit, "TB"))      unit_bytes = 1099511627776.0;
     else if (!strcmp(unit, "GB")) unit_bytes = 1073741824.0;
@@ -2857,7 +2932,7 @@ size_mismatch(const char *tid, const char *ver, long long found,
 static enum MHD_Result
 handle_download_url(struct MHD_Connection *conn, const char *body) {
     char             tid[32], in[768], ver[16], canon[512], state[320], resp[192];
-    char             expect[16];
+    char             expect[16], given[16] = "";
     patchdl_manifest_t mf;
     char             purl[512], durl[512], ptid[16], pstid[16];
     char             cid[64], tname[128], tv[16];
@@ -2929,7 +3004,8 @@ handle_download_url(struct MHD_Connection *conn, const char *body) {
             return queue_json_owned(conn, 507, strdup(resp));
         }
     }
-    if (size_mismatch(tid, ver, found, expect, sizeof expect) &&
+    json_get_str(body, "size", given, sizeof given);
+    if (size_mismatch(tid, ver, given, found, expect, sizeof expect) &&
         !json_get_bool(body, "force", 0)) {
         snprintf(resp, sizeof resp,
                  "{\"ok\":false,\"reason\":\"size_mismatch\","
@@ -3502,6 +3578,10 @@ on_request(void *cls, struct MHD_Connection *conn, const char *url,
         return queue_json_owned(conn, MHD_HTTP_OK, strdup(resp));
     }
 
+    if (!strcmp(url, "/api/versions")) {
+        const char *want = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "title");
+        return queue_versions(conn, want ? want : "");
+    }
     if (!strcmp(url, "/api/netcheck")) {
         const char *want = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "title");
         if (want && want[0])
