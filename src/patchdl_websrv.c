@@ -3744,9 +3744,13 @@ detect_resumable_partials(patchdl_title_t *arr, size_t cnt) {
 
 static void
 start_verxml(void) {
+    pthread_attr_t attr;
     g_verxml_stop = 0;
-    if (pthread_create(&g_verxml_tid, NULL, verxml_fetch_thread, NULL) == 0)
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 512 * 1024);   /* curl, OpenSSL, resolver */
+    if (pthread_create(&g_verxml_tid, &attr, verxml_fetch_thread, NULL) == 0)
         g_verxml_started = 1;
+    pthread_attr_destroy(&attr);
 }
 
 static void
@@ -4022,13 +4026,19 @@ patchdl_websrv_start(unsigned short port) {
     if (g_pool.active_conns > POOL_MAX_CONN) g_pool.active_conns = POOL_MAX_CONN;
     g_pool.stopping = 0;
     {
+        /* An explicit stack: the default one on the console proved too small
+           once (rescan), and curl, OpenSSL and the resolver run here. */
+        pthread_attr_t wattr;
         int spawned = 0;
+        pthread_attr_init(&wattr);
+        pthread_attr_setstacksize(&wattr, 256 * 1024);
         for (int s = 0; s < POOL_MAX_CONN; s++) {
-            if (pthread_create(&g_pool.workers[s], NULL, dl_worker,
+            if (pthread_create(&g_pool.workers[s], &wattr, dl_worker,
                                (void *)(intptr_t)s))
                 break;             /* only the threads that started exist */
             spawned++;
         }
+        pthread_attr_destroy(&wattr);
         if (spawned < g_pool.n_workers) {
             pthread_mutex_lock(&g_pool.mtx);
             g_pool.n_workers = spawned;

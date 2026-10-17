@@ -194,12 +194,19 @@ write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
 
 static int http_get_once(const char *url, patchdl_buf_t *out);
 
-/* Update lists and manifests: a request that failed on the network is tried
-   twice more after a short pause, each time starting at another CDN address.
-   A single dropped connection then doesn't fail a whole download before its
-   first byte. HTTP errors, TLS failures and refused hosts are final. */
 int
 patchdl_http_get(const char *url, patchdl_buf_t *out) {
+    return http_get_once(url, out);
+}
+
+/* Manifests, fetched when a download starts: a request that failed on the
+   network is tried twice more after a short pause, each time starting at
+   another CDN address, so a single dropped connection doesn't fail the
+   download before its first byte. HTTP errors, TLS failures and refused
+   hosts are final. (Update lists aren't retried: the background check walks
+   every game and would crawl when an edge is dead.) */
+static int
+http_get_retrying(const char *url, patchdl_buf_t *out) {
     static const unsigned pause_s[] = { 2, 5 };
     size_t                max = out->max;
     int                   rc = -1;
@@ -1099,7 +1106,7 @@ patchdl_fetch_manifest(const char *manifest_url, patchdl_manifest_t *out) {
     memset(out, 0, sizeof(*out));
     memset(&buf, 0, sizeof(buf));
     buf.max = PATCHDL_BUF_MAX_MANIFEST;
-    if (patchdl_http_get(manifest_url, &buf)) return -1;
+    if (http_get_retrying(manifest_url, &buf)) return -1;
     if (!buf.data || !buf.size) {
         free(buf.data);
         if (!g_last.step[0]) set_last("empty_reply", 0, g_last.http_code);

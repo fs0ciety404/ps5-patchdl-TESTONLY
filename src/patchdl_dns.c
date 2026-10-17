@@ -463,10 +463,11 @@ saved_get(const char *host, patchdl_dns_answer_t *out) {
 
 static void
 saved_put(const char *host, const patchdl_dns_answer_t *a) {
-    char  lines[MAX_SAVED][512], line[512], tmp[sizeof PATCHDL_DNS_SAVE_FILE + 8];
+    char  (*lines)[512], line[512], tmp[sizeof PATCHDL_DNS_SAVE_FILE + 8];
     int   n = 0, fd;
     FILE *f;
 
+    if (!(lines = calloc(MAX_SAVED, sizeof *lines))) return;   /* 16 KB: heap, not stack */
     pthread_mutex_lock(&g_save_mtx);
     /* This host first, then the others it already knew. */
     snprintf(lines[n], sizeof lines[0], "%s ", host);
@@ -495,6 +496,7 @@ saved_put(const char *host, const patchdl_dns_answer_t *a) {
         unlink(tmp);
     }
     pthread_mutex_unlock(&g_save_mtx);
+    free(lines);
 }
 
 /* ---------- the chain --------------------------------------------------- */
