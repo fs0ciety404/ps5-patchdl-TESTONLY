@@ -16,7 +16,7 @@
   <img src="https://img.shields.io/badge/games-PS5%20%7C%20PS4-22c55e?style=for-the-badge" alt="PS5 and PS4 games">
   <img src="https://img.shields.io/badge/FW-1.00%E2%80%9313.60-22c55e?style=for-the-badge" alt="Firmware 1.00 to 13.60">
   <img src="https://img.shields.io/badge/UI-any%20browser-22c55e?style=for-the-badge" alt="Web UI in any browser">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-3a3a3a?style=for-the-badge" alt="License: GPL-3.0"></a>
+  <img src="https://img.shields.io/github/license/knutwurst/ps5-patchdl?style=for-the-badge&color=3a3a3a" alt="License">
 </p>
 
 <p align="center">
