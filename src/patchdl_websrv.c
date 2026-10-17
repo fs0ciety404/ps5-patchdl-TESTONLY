@@ -174,6 +174,7 @@ stream_phase(const install_stream_t *st, time_t now) {
    system file) and reloaded on the next start. Guarded by g_mutex. */
 #define POOL_MAX_CONN 16
 #define POOL_MAX_JOBS 16
+#define SIDECAR_MAX_HAVE 64   /* started pieces remembered in the sidecar */
 
 static struct {
     char default_policy[8];        /* "deny" | "allow" */
@@ -1283,14 +1284,13 @@ build_downloads_json(void) {
     for (dl_job_t *job = g_pool.jobs; job; job = job->next) {
         long long bytes = job->done_bytes, total = job->total;
         int progress;
-        if (job == g_pool.active) {
+        if (job == g_pool.active)
             for (int s = 0; s < g_pool.n_workers; s++)
                 bytes += g_pool.inflight_bytes[s];
-            /* parts of failed pieces waiting to be continued */
-            if (job->ps)
-                for (int i = 0; i < job->mf.count; i++)
-                    if (job->ps[i].state == PC_PENDING) bytes += job->ps[i].have;
-        }
+        /* started pieces waiting to be continued (a paused job too) */
+        if (job->ps)
+            for (int i = 0; i < job->mf.count; i++)
+                if (job->ps[i].state == PC_PENDING) bytes += job->ps[i].have;
         if (job->verifying) bytes = job->verify_bytes;
         if (total > 0) {
             progress = (int)((bytes * 100) / total);
@@ -1720,15 +1720,32 @@ write_job_state(const dl_job_t *job) {
     bitmap_to_hex(job->bitmap, nbytes, hex, (size_t)nbytes * 2 + 1);
     f = fopen(tmp, "w");
     if (f) {
+        int listed = 0;
         fprintf(f,
                 "{\"manifest_url\":\"%s\",\"version\":\"%s\",\"total\":%lld,"
-                "\"piece_count\":%d,\"done_bytes\":%lld,\"done\":\"%s\"}\n",
+                "\"piece_count\":%d,\"done_bytes\":%lld,\"done\":\"%s\",\"have\":\"",
                 job->manifest_url, job->version, job->total, job->mf.count,
                 job->done_bytes, hex);
-        fclose(f);
-        rename(tmp, path);
+        /* "piece:bytes" for started pieces; `have` only ever holds bytes
+           that were synced to disk (see dl_worker) */
+        for (int i = 0; job->ps && i < job->mf.count && listed < SIDECAR_MAX_HAVE; i++)
+            if (job->ps[i].state != PC_DONE && job->ps[i].have > 0)
+                fprintf(f, "%s%d:%lld", listed++ ? "," : "", i, job->ps[i].have);
+        fprintf(f, "\"}\n");
+        if (fclose(f) == 0) rename(tmp, path);
+        else unlink(tmp);
     }
     free(hex);
+}
+
+/* Bytes on disk for a paused or failed job: finished pieces plus the synced
+   parts of started ones. Pool lock held. */
+static long long
+partial_bytes_locked(const dl_job_t *job) {
+    long long b = job->done_bytes;
+    for (int i = 0; job->ps && i < job->mf.count; i++)
+        if (job->ps[i].state != PC_DONE) b += job->ps[i].have;
+    return b;
 }
 
 /* Seed a freshly-admitted job's piece states from its resume sidecar — only if
@@ -1771,6 +1788,24 @@ seed_from_sidecar(dl_job_t *job) {
             job->ps[i].state = PC_DONE;
             job->done_bytes += job->mf.pieces[i].size;
         }
+    /* started pieces continue where they stopped */
+    {
+        char        have[SIDECAR_MAX_HAVE * 24];
+        const char *p = have;
+        json_get_str(buf, "have", have, sizeof have);
+        while (*p) {
+            char     *end;
+            long      idx = strtol(p, &end, 10);
+            long long b;
+            if (*end != ':') break;
+            b = strtoll(end + 1, &end, 10);
+            if (idx >= 0 && idx < job->mf.count && job->ps[idx].state != PC_DONE &&
+                b > 0 && b < job->mf.pieces[idx].size)
+                job->ps[idx].have = b;
+            if (*end != ',') break;
+            p = end + 1;
+        }
+    }
 }
 
 /* ---------- pool scheduler + workers ------------------------------------ */
@@ -1857,7 +1892,7 @@ finalize_pause_locked(dl_job_t *job) {
     if (job->fd >= 0) { close(job->fd); job->fd = -1; }
     job->state = JOB_PAUSED;
     if (g_pool.active == job) g_pool.active = NULL;
-    done = job->done_bytes;
+    done = partial_bytes_locked(job);
     pthread_mutex_unlock(&g_pool.mtx);
     set_title_resumable(title_id, done > 0, done);
     pthread_mutex_lock(&g_pool.mtx);
@@ -1896,7 +1931,7 @@ settle_active_locked(dl_job_t *job) {
         pthread_mutex_lock(&g_pool.mtx);
     } else {
         /* network failure on a piece after retries: keep partial, resumable */
-        long long done = job->done_bytes;
+        long long done = partial_bytes_locked(job);
         job->state = JOB_FAILED;
         write_job_state(job);
         pthread_mutex_unlock(&g_pool.mtx);
@@ -2169,6 +2204,7 @@ dl_worker(void *arg) {
         int       pidx = -1;
         char      url[768], hash[80];
         long long off = 0, sz = 0, have = 0, written = 0;
+        int       synced = 0;
         unsigned int my_seq = 0;
         int       fd = -1, verify = 0, rc;
         volatile int *abort_ptr = NULL;
@@ -2243,6 +2279,10 @@ dl_worker(void *arg) {
                                              verify && hash[0] ? hash : NULL, &ctx,
                                              &last_curl_rc, &last_http_code);
         }
+        /* A stopped piece (failure or pause) keeps what arrived only once
+           it is on disk: `have` may end up in the sidecar and be trusted
+           after a restart. */
+        synced = rc == -1 && g_pool.inflight_bytes[slot] > have && fdatasync(fd) == 0;
 
         pthread_mutex_lock(&g_pool.mtx);
         written = g_pool.inflight_bytes[slot];
@@ -2268,7 +2308,8 @@ dl_worker(void *arg) {
             write_job_state(job);
         } else if (job->abort &&
                    (job->state == JOB_PAUSING || job->state == JOB_CANCELLING)) {
-            job->ps[pidx].state = PC_PENDING;   /* aborted by pause -> redo on resume */
+            job->ps[pidx].state = PC_PENDING;   /* aborted by pause -> continue on resume */
+            if (synced && written < sz) job->ps[pidx].have = written;
         } else if (rc == -2 && have > 0) {
             /* a continued piece failed its hash: the kept part may be what
                is wrong, so fetch the whole piece once more before calling
@@ -2285,8 +2326,9 @@ dl_worker(void *arg) {
             job->ps[pidx].state    = PC_PENDING;
             job->ps[pidx].retry_at = 0;
         } else {
-            /* keep what arrived so the next try continues there */
-            job->ps[pidx].have = written > 0 && written < sz ? written : 0;
+            /* keep what arrived (and was synced) so the next try continues
+               there; otherwise the part that was already safe stays */
+            if (synced && written < sz) job->ps[pidx].have = written;
             job->ps[pidx].attempts++;
             if (job->ps[pidx].attempts < PIECE_MAX_ATTEMPTS) {
                 job->ps[pidx].state    = PC_PENDING;
@@ -2354,6 +2396,14 @@ do_download(struct MHD_Connection *conn, const char *title_id,
     }
     if (existing) {
         job_state_t st = existing->state;
+        if (st == JOB_PAUSING && existing->in_admit) {
+            /* paused while its manifest was still loading: take the pause back */
+            existing->state = JOB_ADMITTING;
+            existing->abort = 0;
+            pthread_mutex_unlock(&g_pool.mtx);
+            return queue_json(conn, MHD_HTTP_OK,
+                              "{\"ok\":true,\"queued\":true,\"resumed\":true}");
+        }
         if (st == JOB_QUEUED || st == JOB_ADMITTING ||
             st == JOB_ACTIVE || st == JOB_PAUSING) {
             pthread_mutex_unlock(&g_pool.mtx);
@@ -3734,6 +3784,20 @@ detect_resumable_partials(patchdl_title_t *arr, size_t cnt) {
         buf[n] = '\0';
         total = json_get_ll(buf, "total", 0);
         done  = json_get_ll(buf, "done_bytes", 0);
+        {
+            /* plus the synced parts of started pieces ("piece:bytes,...") */
+            char        have[SIDECAR_MAX_HAVE * 24];
+            const char *p = have;
+            json_get_str(buf, "have", have, sizeof have);
+            while (*p) {
+                char *end;
+                (void)strtol(p, &end, 10);
+                if (*end != ':') break;
+                done += strtoll(end + 1, &end, 10);
+                if (*end != ',') break;
+                p = end + 1;
+            }
+        }
         if (done > 0 && (total <= 0 || done < total)) {
             t->resumable = 1;
             t->partial_bytes = done;

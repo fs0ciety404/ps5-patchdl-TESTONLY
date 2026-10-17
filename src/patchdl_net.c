@@ -562,7 +562,7 @@ patchdl_http_download_progress(const char *url, const char *dest_path,
 
     if (!fp) return -1;
     rc = http_download_to_file_progress(url, fp, bytes_out, &progress, NULL, 0);
-    fclose(fp);
+    if (fclose(fp) != 0 && !rc) rc = -1;   /* the last flush failed (disk full) */
 
     if (rc) {
         unlink(dest_path);
@@ -1130,11 +1130,11 @@ patchdl_fetch_manifest(const char *manifest_url, patchdl_manifest_t *out) {
 
     for (p = pieces; (p = strstr(p, "\"url\"")) && (!pieces_end || p < pieces_end); p += 5)
         cap++;
-    if (cap <= 0) { free(buf.data); return -1; }
+    if (cap <= 0) { free(buf.data); set_last("bad_manifest", 0, g_last.http_code); return -1; }
     /* Sanity caps: refuse a manifest that would let a CDN drive multi-TB
        allocations or millions of pieces. The biggest real PS5 patch we've
        seen is ~70 GB / 18 pieces; these limits leave room to spare. */
-    if (cap > PATCHDL_MAX_PIECES) { free(buf.data); return -1; }
+    if (cap > PATCHDL_MAX_PIECES) { free(buf.data); set_last("bad_manifest", 0, g_last.http_code); return -1; }
     out->pieces = calloc((size_t)cap, sizeof(patchdl_piece_t));
     if (!out->pieces) { free(buf.data); return -1; }
 
@@ -1154,14 +1154,11 @@ patchdl_fetch_manifest(const char *manifest_url, patchdl_manifest_t *out) {
 
         /* Validate tiling: pieces must be in order, contiguous, non-empty,
            and each individually under the per-piece cap. */
-        if ((long long)off != running || sz == 0 || sz > PATCHDL_MAX_PIECE_BYTES) {
+        if ((long long)off != running || sz == 0 || sz > PATCHDL_MAX_PIECE_BYTES ||
+            (unsigned long long)running + sz > PATCHDL_MAX_TOTAL_BYTES) {
             patchdl_manifest_free(out);
             free(buf.data);
-            return -1;
-        }
-        if ((unsigned long long)running + sz > PATCHDL_MAX_TOTAL_BYTES) {
-            patchdl_manifest_free(out);
-            free(buf.data);
+            set_last("bad_manifest", 0, g_last.http_code);
             return -1;
         }
         out->pieces[n].url    = strdup(url);
@@ -1182,7 +1179,7 @@ patchdl_fetch_manifest(const char *manifest_url, patchdl_manifest_t *out) {
     json_string_after(buf.data, "playgoChunkCrcUrl", out->crc_url,
                       sizeof(out->crc_url), NULL);
     free(buf.data);
-    if (n == 0) { patchdl_manifest_free(out); return -1; }
+    if (n == 0) { patchdl_manifest_free(out); set_last("bad_manifest", 0, g_last.http_code); return -1; }
     out->total = running;        /* authoritative assembled size */
     return 0;
 }
