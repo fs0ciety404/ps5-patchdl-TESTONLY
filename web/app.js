@@ -2068,6 +2068,9 @@ async function guideSubmit(url, force) {
           expected: escapeHtml(b.expected || "?"),
         }),
         { label: t("guide.downloadAnyway"), run: () => guideSubmit(url, true) });
+    } else if (pick.ps4 && (b.reason === "not_an_sc_link" || b.reason === "url_not_allowed")) {
+      // Orbis offers piece links, not Prospero's SC link
+      guideStatus("error", escapeHtml(t("reason.notOrbisLink")));
     } else {
       guideStatus("error", escapeHtml(reasonText(error)) + (b.detail ? ` (${escapeHtml(b.detail)})` : ""));
     }

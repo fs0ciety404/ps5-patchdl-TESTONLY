@@ -2853,16 +2853,15 @@ manifest_from_link(const char *tid, const char *in, char *canon, size_t sz) {
         size_t el = strlen(ends[i]);
         if (n > el && !strcmp(in + n - el, ends[i])) { stem_end = in + n - el; break; }
     }
-    /* PS4: Orbis Patches lists the pieces ("<name>_0.pkg", "_1.pkg", ...),
-       which sit in the same gs2 folder as the manifest "<name>.json". */
+    /* PS4: Orbis Patches lists the pieces, which sit in the same gs2 folder
+       as the manifest "<name>.json": "<name>_0.pkg", "_1.pkg", ... for a
+       split package, or just "<name>.pkg" when it is a single piece. */
     if (!stem_end && !strncmp(rest, "gs2.ww.prod.dl.playstation.net/", 31) &&
         n > 5 && !strcmp(in + n - 4, ".pkg")) {
         const char *d = in + n - 4;
         while (d > in && isdigit((unsigned char)d[-1])) d--;
-        if (d < in + n - 4 && d > in && d[-1] == '_') {
-            stem_end = d - 1;
-            ps4_piece = 1;
-        }
+        stem_end = (d < in + n - 4 && d > in && d[-1] == '_') ? d - 1 : in + n - 4;
+        ps4_piece = 1;
     }
     if (!stem_end)                  return "not_an_sc_link";
     base = strrchr(in, '/') + 1;    /* the scheme guarantees a '/' */
