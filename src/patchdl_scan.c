@@ -26,6 +26,10 @@
 
 #define MAX_TITLES 512
 
+#ifndef PATCHDL_HTTP_PORT
+#define PATCHDL_HTTP_PORT 12880
+#endif
+
 static const char *SCAN_DIRS[] = {
     "/user/app",
     "/mnt/ext0/user/app",
@@ -373,6 +377,20 @@ scan_one(const char *base, const char *name, patchdl_title_t *t,
                        : (is_fake || t->pkg_sign == PATCHDL_PKG_FAKE)
                                                    ? PATCHDL_SOURCE_FAKE
                                                    : PATCHDL_SOURCE_UNKNOWN;
+        /* A Sony-signed package someone installed with another tool, often
+           to keep one exact app version. PatchDL's own installs name its
+           loopback server in app.json. An update would replace that
+           version. */
+        {
+            /* PatchDL installs from its server (loopback or LAN address,
+               both on its port) or, as a fallback, from its download folder
+               (/user/data/patchdl/...). app.json escapes slashes, so match
+               pieces without them. */
+            char port[16];
+            snprintf(port, sizeof port, ":%d", PATCHDL_HTTP_PORT);
+            t->sideloaded = is_fake && t->source_type == PATCHDL_SOURCE_OFFICIAL &&
+                            !strstr(appjson, port) && !strstr(appjson, "patchdl");
+        }
     } else if (is_shadow || has_mountlnk || has_paramjson ||
                path_exists(dir, "sce_sys/param.sfo")) {
         if (try_param_json(dir, t)) /* metadata from the mounted sce_sys */

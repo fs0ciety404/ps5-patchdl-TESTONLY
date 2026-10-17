@@ -132,6 +132,25 @@ svg {
   color: var(--muted);
 }
 .donate-row .row-button { width: auto; padding: 0 16px; }
+.diag-body { display: grid; gap: 14px; }
+.diag-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.diag-row { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 8px; align-items: start; }
+.diag-row > b { font-size: 16px; }
+.diag-row.is-ok > b { color: var(--green); }
+.diag-row.is-bad > b { color: var(--red); }
+.diag-row em { color: var(--muted); font-style: normal; font-size: 13px; }
+.diag-report {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--ink);
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  resize: vertical;
+}
+.diag-copy { justify-self: start; width: auto; padding: 0 18px; }
 .donate-open { display: inline-flex; align-items: center; justify-content: center; text-decoration: none; justify-self: start; padding: 0 18px; }
 
 /* ---------------- views + topbar ---------------- */

@@ -57,6 +57,14 @@ typedef struct {
    piece list. Returns 0 on success (caller frees with patchdl_manifest_free),
    -1 on fetch/parse/tiling failure. */
 int  patchdl_fetch_manifest(const char *manifest_url, patchdl_manifest_t *out);
+
+/* Why this thread's last patchdl_http_get / patchdl_fetch_manifest failed:
+   step is "" on success, else e.g. "dns", "tls", "network", "timeout",
+   "redirect", "http_status", "bad_manifest". curl_rc and http_code as seen. */
+void patchdl_http_last_error(char *step, size_t step_sz, int *curl_rc, long *http_code);
+
+/* PatchDL's own DNS answer for host (first IPv4 address). 0 on success. */
+int  patchdl_resolve_host(const char *host, char *ip_out, size_t ip_sz);
 void patchdl_manifest_free(patchdl_manifest_t *m);
 
 

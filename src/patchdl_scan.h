@@ -38,6 +38,8 @@ typedef struct {
     char             version_file_uri[256]; /* from app.db, for version.xml */
     patchdl_source_t source_type;
     patchdl_pkg_sign_t pkg_sign;      /* app.pkg header verdict, for diagnostics */
+    int              sideloaded;       /* Sony-signed, but installed by another
+                                          tool (not Store, disc or PatchDL) */
     int              icon_fd;          /* open icon0.png, or -1; see patchdl_scan */
     /* populated by background verxml fetch — guarded by websrv mutex */
     char             compatible_version[16];

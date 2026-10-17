@@ -232,6 +232,7 @@ typedef struct dl_job {
     long long          verify_bytes;   /* bytes hashed so far */
     long long          free_bytes;     /* rc -3: bytes free on /data at the time */
     int                last_curl_rc;   /* CURLcode from the most recent piece */
+    char               fail_step[24];  /* why admit failed (manifest fetch), or "" */
     long               last_http_code; /* HTTP status from the most recent piece */
     struct dl_job     *next;
 } dl_job_t;
@@ -1018,6 +1019,12 @@ save_config(void) {
     for (size_t i = 0; i < g_title_count; i++)
         fprintf(f, "%s\"%s\":%s", i ? "," : "",
                 g_titles[i].title_id, g_titles[i].enabled ? "true" : "false");
+    /* Sideloaded titles the user switched on, kept apart so a switch saved
+       before sideloaded titles started off can't turn one on. */
+    fprintf(f, "},\n\"sideload_updates\":{");
+    for (size_t i = 0, n = 0; i < g_title_count; i++)
+        if (g_titles[i].sideloaded && g_titles[i].enabled)
+            fprintf(f, "%s\"%s\":true", n++ ? "," : "", g_titles[i].title_id);
     fprintf(f, "}\n}\n");
     pthread_mutex_unlock(&g_mutex);
 
@@ -1026,27 +1033,46 @@ save_config(void) {
 
 /* Load persisted settings over the defaults. Called once at startup, after the
    scan, while still single-threaded. */
+/* The whole config file, malloc'd and NUL-terminated, or NULL. It holds a
+   switch per title (twice for sideloaded ones), so no fixed buffer. */
+static char *
+read_config_file(void) {
+    FILE  *f = fopen(PATCHDL_CFG_PATH, "r");
+    long   len;
+    char  *buf;
+    size_t n;
+
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) || (len = ftell(f)) < 0 || len > 1024 * 1024 ||
+        fseek(f, 0, SEEK_SET) || !(buf = malloc((size_t)len + 1))) {
+        fclose(f);
+        return NULL;
+    }
+    n = fread(buf, 1, (size_t)len, f);
+    fclose(f);
+    buf[n] = '\0';
+    return buf;
+}
+
 /* Per-title overrides live under "titles": { "<id>": true|false, ... }. */
 static void
 overlay_title_policy(const char *cfg, patchdl_title_t *arr, size_t cnt) {
     const char *titles = strstr(cfg, "\"titles\"");
-    if (titles)
-        for (size_t i = 0; i < cnt; i++)
+    const char *side   = strstr(cfg, "\"sideload_updates\"");
+    for (size_t i = 0; i < cnt; i++) {
+        if (arr[i].sideloaded)   /* off unless switched on as sideloaded */
+            arr[i].enabled = side ? json_get_bool(side, arr[i].title_id, 0) : 0;
+        else if (titles)
             arr[i].enabled = json_get_bool(titles, arr[i].title_id, arr[i].enabled);
+    }
 }
 
 static void
 load_config(void) {
-    FILE  *f;
-    char   buf[16384];
-    size_t n;
+    char  *buf = read_config_file();
     char   pol[8];
 
-    f = fopen(PATCHDL_CFG_PATH, "r");
-    if (!f) return;
-    n = fread(buf, 1, sizeof(buf) - 1, f);
-    fclose(f);
-    buf[n] = '\0';
+    if (!buf) return;
 
     json_get_str(buf, "default_policy", pol, sizeof(pol));
     if (pol[0]) {
@@ -1067,24 +1093,20 @@ load_config(void) {
     if (g_cfg.max_connections > POOL_MAX_CONN) g_cfg.max_connections = POOL_MAX_CONN;
 
     overlay_title_policy(buf, g_titles, g_title_count);
+    free(buf);
 }
 
 /* Per-title switches for a freshly scanned list: unknown sources start off,
    a saved choice from config.json wins, and a fake package stays off. */
 static void
 apply_title_policy(patchdl_title_t *arr, size_t cnt) {
-    FILE  *f;
-    char   buf[16384];
-    size_t n = 0;
+    char *buf = read_config_file();
 
     for (size_t i = 0; i < cnt; i++)
-        arr[i].enabled = (arr[i].source_type != PATCHDL_SOURCE_UNKNOWN);
-    if ((f = fopen(PATCHDL_CFG_PATH, "r"))) {
-        n = fread(buf, 1, sizeof(buf) - 1, f);
-        fclose(f);
-    }
-    buf[n] = '\0';
-    overlay_title_policy(buf, arr, cnt);
+        arr[i].enabled = (arr[i].source_type != PATCHDL_SOURCE_UNKNOWN) &&
+                         !arr[i].sideloaded;
+    overlay_title_policy(buf ? buf : "", arr, cnt);
+    free(buf);
     for (size_t i = 0; i < cnt; i++)
         if (arr[i].source_type == PATCHDL_SOURCE_FAKE)
             arr[i].enabled = 0;
@@ -1202,6 +1224,7 @@ build_titles_json(void) {
         jbuf_appendf(&j, ",\"resumable\":%s", t->resumable ? "true" : "false");
         jbuf_appendf(&j, ",\"partial_bytes\":%lld", t->partial_bytes);
         jbuf_appendf(&j, ",\"downloaded\":%s", t->downloaded ? "true" : "false");
+        jbuf_appendf(&j, ",\"sideloaded\":%s", t->sideloaded ? "true" : "false");
         jbuf_append(&j, ",\"mode\":");
             jbuf_append_str(&j, title_mode_str(t->source_type));
         jbuf_append(&j, ",\"queued\":false");
@@ -1267,6 +1290,10 @@ build_downloads_json(void) {
         if (job->rc == -3)
             jbuf_appendf(&j, ",\"need_bytes\":%lld,\"free_bytes\":%lld",
                          job->need_bytes, job->free_bytes);
+        if (job->fail_step[0]) {
+            jbuf_append(&j, ",\"fail_step\":");
+            jbuf_append_str(&j, job->fail_step);
+        }
         jbuf_append(&j, "}");
     }
     jbuf_append(&j, "]");
@@ -1901,6 +1928,9 @@ admit_next(void) {
     char               murl[768], dest[320], dir[288];
     int                is_manifest, fd = -1, ok = 0, no_space = 0;
     unsigned char     *pre_done = NULL;   /* pieces proven good by hash */
+    char               fstep[24] = "";
+    int                fcurl = 0;
+    long               fhttp = 0;
     int                adopted = 0;
     long long          total = 0, old_size = 0, need = 0, free_b = 0;
     dl_pstate_t       *ps = NULL;
@@ -1925,7 +1955,10 @@ admit_next(void) {
     mkdir(PATCHDL_DL_DIR, 0777);
     mkdir(dir, 0777);
     if (is_manifest) {
-        if (patchdl_fetch_manifest(murl, &mf) == 0 && mf.count > 0) {
+        if (patchdl_fetch_manifest(murl, &mf) != 0 || mf.count <= 0) {
+            patchdl_http_last_error(fstep, sizeof fstep, &fcurl, &fhttp);
+            if (!fstep[0]) snprintf(fstep, sizeof fstep, "manifest");
+        } else {
             total = mf.total;
             adopted = adopt_by_size(dir, dest, total);
             need  = space_needed(dest, total);
@@ -2003,6 +2036,11 @@ admit_next(void) {
             q->rc = no_space ? -3 : -1;
             q->need_bytes = need;
             q->free_bytes = free_b;
+            /* the manifest fetch failed: say where, so a report can tell a
+               blocked host from a TLS or HTTP problem */
+            snprintf(q->fail_step, sizeof q->fail_step, "%s", fstep);
+            q->last_curl_rc   = fcurl;
+            q->last_http_code = fhttp;
         }
         pthread_cond_broadcast(&g_pool.cv);
         return;
@@ -2017,6 +2055,7 @@ admit_next(void) {
     free(q->bitmap); q->bitmap = NULL;
     q->done_bytes = 0; q->pieces_failed = 0; q->rc = 0;
     q->last_curl_rc = 0; q->last_http_code = 0;
+    q->fail_step[0] = '\0';
 
     q->mf = mf; q->ps = ps; q->bitmap = bitmap; q->fd = fd; q->total = total;
     for (int i = 0; i < mf.count; i++) q->ps[i].slot = -1;
@@ -2524,6 +2563,94 @@ build_storage_json(void) {
     }
     jbuf_appendf(&j, "],\"total_bytes\":%lld}", sum);
     return j.buf;
+}
+
+/* Host part of a URL into out ("" if none). */
+static void
+url_host_of(const char *url, char *out, size_t sz) {
+    const char *p = strstr(url, "://");
+    size_t      n;
+    out[0] = '\0';
+    if (!p) return;
+    p += 3;
+    n = strcspn(p, "/:?");
+    if (n < sz) { memcpy(out, p, n); out[n] = '\0'; }
+}
+
+/* GET /api/netcheck?title=<id>: walk one title's update chain the way a
+   download does (update list, then the package manifest) and report each
+   step with PatchDL's own DNS answer, so a report shows where it breaks. */
+static enum MHD_Result
+queue_netcheck_title(struct MHD_Connection *conn, const char *tid) {
+    char              vurl[512] = "", host[128], ip[48], step[24], tid9[16];
+    char              murl[768] = "", durl[512], ptid[16], pstid[16], cid[64];
+    char              nm[128], ver[16];
+    patchdl_source_t  src;
+    int               en;
+    char             *out;
+    int               curl_rc = 0, vrc, mrc = -1, pieces = 0;
+    long              http = 0;
+    patchdl_verinfo_t info;
+    patchdl_manifest_t mf;
+    jbuf_t            j = {0};
+
+    /* Same ids as the title actions; Sony's URLs use the 9-character id. */
+    if (!path_segment_safe(tid) || strlen(tid) < 9 || strlen(tid) >= 32)
+        return queue_text(conn, MHD_HTTP_FORBIDDEN, "forbidden");
+    snprintf(tid9, sizeof tid9, "%.9s", tid);
+    pthread_mutex_lock(&g_mutex);
+    for (size_t i = 0; i < g_title_count; i++)
+        if (!strncmp(g_titles[i].title_id, tid, 9)) {
+            snprintf(vurl, sizeof vurl, "%s", g_titles[i].version_file_uri);
+            break;
+        }
+    pthread_mutex_unlock(&g_mutex);
+    if (!vurl[0]) patchdl_resolve_url(tid9, vurl, sizeof vurl);
+
+    jbuf_append(&j, "{\"title_id\":");  jbuf_append_str(&j, tid);
+    jbuf_append(&j, ",\"update_list\":{\"url\":"); jbuf_append_str(&j, vurl);
+    url_host_of(vurl, host, sizeof host);
+    ip[0] = '\0';
+    if (host[0]) patchdl_resolve_host(host, ip, sizeof ip);
+    jbuf_append(&j, ",\"ip\":"); jbuf_append_str(&j, ip);
+    memset(&info, 0, sizeof info);
+    vrc = vurl[0] ? patchdl_verxml_query(vurl, g_fw.bin, &info) : -1;
+    patchdl_http_last_error(step, sizeof step, &curl_rc, &http);
+    jbuf_appendf(&j, ",\"ok\":%s,\"curl\":%d,\"http\":%ld,\"step\":",
+                 vrc == 0 ? "true" : "false", curl_rc, http);
+    jbuf_append_str(&j, step);
+    jbuf_append(&j, ",\"latest\":"); jbuf_append_str(&j, info.latest_version);
+    /* The package a download would use: a pasted Prospero link wins over
+       Sony's current list, exactly as for the download itself. */
+    if (!get_title_action_info(tid, &src, murl, sizeof murl, durl, sizeof durl,
+                               ptid, sizeof ptid, pstid, sizeof pstid,
+                               cid, sizeof cid, nm, sizeof nm, ver, sizeof ver, &en) ||
+        !murl[0])
+        snprintf(murl, sizeof murl, "%s", info.compatible_url);
+    jbuf_append(&j, "},\"manifest\":{\"url\":"); jbuf_append_str(&j, murl);
+    url_host_of(murl, host, sizeof host);
+    ip[0] = '\0';
+    if (host[0]) patchdl_resolve_host(host, ip, sizeof ip);
+    jbuf_append(&j, ",\"ip\":"); jbuf_append_str(&j, ip);
+    memset(&mf, 0, sizeof mf);
+    step[0] = '\0'; curl_rc = 0; http = 0;
+    if (url_is_manifest(murl)) {
+        mrc = patchdl_fetch_manifest(murl, &mf);
+        patchdl_http_last_error(step, sizeof step, &curl_rc, &http);
+        pieces = mf.count;
+        patchdl_manifest_free(&mf);
+    } else if (murl[0]) {
+        /* a single package without a piece list: nothing to fetch here */
+        mrc = 0;
+        pieces = 1;
+        snprintf(step, sizeof step, "direct");
+    }
+    jbuf_appendf(&j, ",\"ok\":%s,\"pieces\":%d,\"curl\":%d,\"http\":%ld,\"step\":",
+                 mrc == 0 ? "true" : "false", pieces, curl_rc, http);
+    jbuf_append_str(&j, step);
+    jbuf_append(&j, "}}");
+    out = j.buf;
+    return queue_json_owned(conn, MHD_HTTP_OK, out);
 }
 
 static enum MHD_Result
@@ -3376,6 +3503,11 @@ on_request(void *cls, struct MHD_Connection *conn, const char *url,
     }
 
     if (!strcmp(url, "/api/netcheck")) {
+        const char *want = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "title");
+        if (want && want[0])
+            return queue_netcheck_title(conn, want);
+    }
+    if (!strcmp(url, "/api/netcheck")) {
         char diag[1024] = "{\"error\":\"no title with version_file_uri\"}";
         char uri[256] = "";
         /* copy under the lock, probe without it: the probe blocks on the
@@ -3448,7 +3580,11 @@ stop_verxml(void) {
    and the rescan isn't an explicit refresh; otherwise it runs again. */
 static void
 carry_title_state(patchdl_title_t *dst, const patchdl_title_t *src, int recheck) {
-    dst->enabled       = src->enabled;
+    /* A title that turned sideloaded (or back) keeps the switch its new
+       state starts with, so a sideloaded copy is never updated without the
+       user switching it on. */
+    if (dst->sideloaded == src->sideloaded)
+        dst->enabled = src->enabled;
     dst->resumable     = src->resumable;
     dst->partial_bytes = src->partial_bytes;
     dst->downloaded    = src->downloaded;
@@ -3662,7 +3798,8 @@ patchdl_websrv_start(unsigned short port) {
     /* Default per-title policy (unknown sources off), then overlay anything the
        user previously saved to /data/patchdl/config.json. */
     for (size_t i = 0; i < g_title_count; i++)
-        g_titles[i].enabled = (g_titles[i].source_type != PATCHDL_SOURCE_UNKNOWN);
+        g_titles[i].enabled = (g_titles[i].source_type != PATCHDL_SOURCE_UNKNOWN) &&
+                              !g_titles[i].sideloaded;
     load_config();
     /* A saved config must not switch a fake package back on. */
     for (size_t i = 0; i < g_title_count; i++)

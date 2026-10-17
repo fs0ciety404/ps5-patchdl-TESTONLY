@@ -119,11 +119,137 @@ const els = {};
 document.addEventListener("DOMContentLoaded", () => {
   bindElements();
   bindEvents();
-  loadInitialData().then(openGuideFromHash);
+  loadInitialData().then(() => { openGuideFromHash(); openDiagFromHash(); });
   window.addEventListener("hashchange", openGuideFromHash);
   setInterval(watchTitles, 5000);
   document.querySelectorAll("[data-donate]").forEach((b) => b.addEventListener("click", openDonate));
+  // Cards are re-rendered often; listen once on the document.
+  document.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-diag]");
+    if (b) openDiag(b.dataset.diag);
+  });
+  window.addEventListener("hashchange", openDiagFromHash);
 });
+
+/* ---------------- download diagnosis ---------------- */
+
+function diagLink(titleId) {
+  const h = location.hostname;
+  let base = location.origin;
+  if (!h || h === "localhost" || h === "127.0.0.1" || h === "[::1]") {
+    if (!state.status.lan_ip) return null;
+    base = `http://${state.status.lan_ip}:${state.status.http_port || location.port || 12880}`;
+  }
+  return `${base}/#diag/${encodeURIComponent(titleId)}`;
+}
+
+function openDiagFromHash() {
+  const m = location.hash.match(/^#diag\/([A-Za-z0-9_.-]+)$/);
+  if (!m) return;
+  history.replaceState(null, "", location.pathname + location.search);
+  openDiag(m[1]);
+}
+
+async function fetchJson(url) {
+  try {
+    const r = await fetch(url, { cache: "no-store" });
+    return r.ok ? await r.json() : null;
+  } catch (_) { return null; }
+}
+
+function diagRow(ok, label, detail) {
+  return `<li class="diag-row ${ok ? "is-ok" : "is-bad"}"><b>${ok ? "✓" : "✗"}</b>
+    <span><strong>${escapeHtml(label)}</strong>${detail ? `<br><em>${escapeHtml(detail)}</em>` : ""}</span></li>`;
+}
+
+// Runs the network check for one game and shows it as a checklist plus a
+// report to paste into an issue. On the PS5 (no clipboard) a QR code opens
+// the same dialog on a phone.
+async function openDiag(titleId) {
+  const game = state.titles.find((g) => g.title_id === titleId);
+  const name = game ? game.name : titleId;
+  const back = document.activeElement;
+  const wrap = document.createElement("div");
+  wrap.className = "guide-backdrop";
+  wrap.innerHTML = `
+    <section class="guide" role="dialog" aria-modal="true" aria-labelledby="diagTitle">
+      <header class="guide-head">
+        <div>
+          <p class="eyebrow">Download problem</p>
+          <h2 id="diagTitle">${escapeHtml(name)}</h2>
+          <p class="guide-game">${escapeHtml(titleId)}</p>
+        </div>
+        <button class="icon-button guide-close" type="button" aria-label="Close">×</button>
+      </header>
+      <div class="diag-body"><p class="guide-why">Checking the connection to Sony's servers…</p></div>
+    </section>`;
+  const close = () => {
+    document.removeEventListener("keydown", onKey);
+    wrap.remove();
+    if (back && document.contains(back)) back.focus();
+  };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  wrap.querySelector(".guide-close").addEventListener("click", close);
+  wrap.addEventListener("click", (e) => { if (e.target === wrap) close(); });
+  document.addEventListener("keydown", onKey);
+  document.body.appendChild(wrap);
+  wrap.querySelector(".guide-close").focus();
+
+  const [check, status, downloads, pkg, inst] = await Promise.all([
+    fetchJson(`/api/netcheck?title=${encodeURIComponent(titleId)}`),
+    fetchJson(API.status),
+    fetchJson(API.downloads),
+    fetchJson("/api/pkgdiag"),
+    fetchJson(API.installStatus),
+  ]);
+  if (!document.contains(wrap)) return;
+  const job = (downloads || []).find((d) => d.title_id === titleId) || null;
+  const ul = check && check.update_list, mf = check && check.manifest;
+  const mfDetail = !mf ? "" : mf.ok && mf.step === "direct" ? "Single package, no list needed." :
+    mf.ok ? `${mf.pieces} piece(s)` :
+    mf.url ? failStepText({ fail_step: mf.step || "manifest", last_http_code: mf.http }) :
+    "No package for this firmware.";
+  const rows = [
+    diagRow(Boolean(ul && ul.ok), "Update list from Sony",
+      !ul ? "No answer from PatchDL."
+        : ul.ok ? `Newest: ${ul.latest || "?"}`
+        : !ul.url ? "PatchDL knows no update address for this game."
+        : failStepText({ fail_step: ul.step || "network", last_http_code: ul.http })),
+    diagRow(Boolean(mf && mf.ok), "Package list (manifest)", mfDetail),
+  ];
+  if (job) rows.push(diagRow(job.state !== "error", "Last download",
+    job.state === "error" ? (job.fail_step ? failStepText(job) : "Failed while downloading the pieces.") : job.state));
+
+  const report = [
+    "PatchDL diagnostic report",
+    `PatchDL ${status ? status.version : "?"} · FW ${status ? status.firmware : "?"}`,
+    `Game: ${name} (${titleId})${game ? ` · installed ${game.installed_version || "?"} · ${game.source_type}${game.sideloaded ? ", sideloaded" : ""}` : ""}`,
+    `Download: ${job ? JSON.stringify(job) : "none"}`,
+    `Network check: ${check ? JSON.stringify(check) : "unavailable"}`,
+    `Install: ${inst ? JSON.stringify(inst.streams || inst) : "unavailable"}`,
+    `Console requests: ${pkg && pkg.log ? pkg.log.slice(-8).join(" | ") : "none"}`,
+    ...(state.logs.length ? ["Log:", ...state.logs.slice(-15)] : []),
+  ].join("\n");
+
+  const onConsole = isConsoleBrowser();
+  const link = onConsole ? diagLink(titleId) : null;
+  const matrix = link ? qrEncode(link) : null;
+  wrap.querySelector(".diag-body").innerHTML = `
+    <ul class="diag-list">${rows.join("")}</ul>
+    ${onConsole
+      ? (matrix ? `<div class="guide-qr">${qrSvg(matrix)}<div>
+          <span>To report this, scan with your phone. The same report opens there, ready to copy.</span></div></div>` : "")
+      : `<p class="guide-why">To report this, copy the report and paste it into a GitHub issue.</p>`}
+    <textarea class="diag-report" readonly rows="8" aria-label="Diagnostic report">${escapeHtml(report)}</textarea>
+    ${onConsole ? "" : `<button type="button" class="row-button is-update diag-copy">Copy report</button>`}`;
+  const copy = wrap.querySelector(".diag-copy");
+  if (copy) copy.addEventListener("click", async () => {
+    const ta = wrap.querySelector(".diag-report");
+    try { await navigator.clipboard.writeText(report); }
+    catch (_) { ta.select(); document.execCommand("copy"); }
+    showToast("Report copied.");
+  });
+}
 
 const DONATE_URL = "https://paypal.me/oliverkoester";
 
@@ -525,6 +651,7 @@ function createGameCard(game) {
       ${statusPill(game)}
       ${sourcePill(game)}
       ${isPs4(game) ? `<span class="pill">PS4</span>` : ""}
+      ${game.sideloaded ? `<span class="pill warn" title="Installed outside the Store, disc or PatchDL">Sideloaded</span>` : ""}
     </div>
     <div class="versions">${versionsHtml(game)}</div>
   `;
@@ -655,10 +782,14 @@ function versionsHtml(game) {
   const job = state.downloads.find((d) => d.title_id === game.title_id);
   if (job && job.state === "error" && Number(job.rc) === -3)
     parts.push(`<span class="card-note is-warn">${noSpaceText(job.need_bytes, job.free_bytes)}</span>`);
+  else if (job && job.state === "error")
+    parts.push(`<span class="card-note is-warn">Download failed. ${job.fail_step ? escapeHtml(failStepText(job)) + " " : ""}<button type="button" class="link-button" data-diag="${escapeHtml(game.title_id)}">Details</button></span>`);
   if (game.latest_version && game.latest_version !== offered) {
     const fw = game.latest_required_fw ? ` · needs FW ${escapeHtml(game.latest_required_fw)}` : "";
     parts.push(`<span>Newest ${v(game.latest_version)}${fw}</span>`);
   }
+  if (game.sideloaded)
+    parts.push(`<span class="card-note is-warn">Installed outside the Store. An update replaces this exact version, which some tools depend on. Switch on Updates only if you want that.</span>`);
   return parts.join("");
 }
 
@@ -808,7 +939,12 @@ function reconcileFromJobs(jobs) {
         if (!g._spaceWarned) showToast(`${g.name}: ${noSpaceText(j.need_bytes, j.free_bytes)}`);
         g._spaceWarned = true;
       } else if (g._wasActive) {
-        showToast(`${g.name}: download failed${bytes > 0 ? " — partial kept, press Resume to continue" : "."}`);
+        const why = j.fail_step ? ` ${failStepText(j)}` : "";
+        showToast(`${g.name}: download failed${bytes > 0 ? " — partial kept, press Resume to continue" : "."}${why}`);
+        if (j.fail_step) {
+          state.logs.push(`[${timeNow()}] Download ${g.title_id} failed while fetching the package list: ${j.fail_step} (curl ${j.last_curl_rc}, HTTP ${j.last_http_code})`);
+          renderLogs();
+        }
       }
       g._wasActive = false;
       g.downloading = false;
@@ -816,6 +952,22 @@ function reconcileFromJobs(jobs) {
       g.partial_bytes = bytes || g.partial_bytes || 0;
     }
   });
+}
+
+// Why the package list (manifest) couldn't be fetched, in words.
+function failStepText(j) {
+  const http = Number(j.last_http_code) || 0;
+  return ({
+    dns: "Sony's download server couldn't be found (DNS). Is it blocked on your network?",
+    network: "Couldn't connect to Sony's download server. Is it blocked on your network?",
+    timeout: "Sony's download server didn't answer in time.",
+    tls: "The secure connection to Sony's server failed.",
+    redirect: "Sony's server sent PatchDL somewhere it doesn't follow.",
+    http_status: `Sony's server answered HTTP ${http}.`,
+    bad_manifest: "Sony's server sent something that isn't a package list.",
+    empty_reply: "Sony's server sent an empty reply.",
+    host_not_allowed: "The package is on a server PatchDL doesn't use.",
+  })[j.fail_step] || `Package list unavailable (${j.fail_step}).`;
 }
 
 function startInstallPolling() {

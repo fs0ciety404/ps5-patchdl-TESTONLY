@@ -95,6 +95,36 @@ host_allowed(const char *host) {
 }
 
 /* Extract hostname from https://host/path or http://host/path */
+/* Why the calling thread's last patchdl_http_get failed (or what status it
+   got), for error reports. */
+static _Thread_local struct {
+    char step[24];
+    int  curl_rc;
+    long http_code;
+} g_last;
+
+static void
+set_last(const char *step, int curl_rc, long http_code) {
+    snprintf(g_last.step, sizeof g_last.step, "%s", step);
+    g_last.curl_rc   = curl_rc;
+    g_last.http_code = http_code;
+}
+
+/* PatchDL's own DNS answer for a host (first A record), for diagnostics. */
+static int dns_lookup(const char *host, char *ip_out, size_t ip_sz);
+
+int
+patchdl_resolve_host(const char *host, char *ip_out, size_t ip_sz) {
+    return dns_lookup(host, ip_out, ip_sz);
+}
+
+void
+patchdl_http_last_error(char *step, size_t step_sz, int *curl_rc, long *http_code) {
+    if (step && step_sz) snprintf(step, step_sz, "%s", g_last.step);
+    if (curl_rc) *curl_rc = g_last.curl_rc;
+    if (http_code) *http_code = g_last.http_code;
+}
+
 /* Manifest piece hashes: PS5 manifests carry SHA-256 (64 hex digits), PS4
    manifests SHA-1 (40). */
 static const EVP_MD *
@@ -306,11 +336,13 @@ patchdl_http_get(const char *url, patchdl_buf_t *out) {
     struct curl_blob  ca_blob;
 
     int plain = !strncmp(url, "http://", 7);
+    long http_code = 0;
 
-    if (url_host(url, host, sizeof(host))) return -1;
-    if (!host_allowed(host)) return -1;
-    if (plain && strcasecmp(host, PLAIN_HTTP_HOST)) return -1;
-    if (dns_lookup(host, ip, sizeof(ip))) return -1;
+    set_last("", 0, 0);
+    if (url_host(url, host, sizeof(host))) { set_last("bad_url", 0, 0); return -1; }
+    if (!host_allowed(host)) { set_last("host_not_allowed", 0, 0); return -1; }
+    if (plain && strcasecmp(host, PLAIN_HTTP_HOST)) { set_last("http_not_allowed", 0, 0); return -1; }
+    if (dns_lookup(host, ip, sizeof(ip))) { set_last("dns", 0, 0); return -1; }
 
     snprintf(resolve_str, sizeof(resolve_str), "%s:443:%s", host, ip);
     resolve_list = curl_slist_append(NULL, resolve_str);
@@ -359,15 +391,22 @@ patchdl_http_get(const char *url, patchdl_buf_t *out) {
     curl_easy_setopt(curl, CURLOPT_USERAGENT,       "patchdl/1.0");
 
     res = curl_easy_perform(curl);
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
     curl_easy_cleanup(curl);
     curl_slist_free_all(resolve_list);
 
     if (res != CURLE_OK) {
+        set_last(res == CURLE_PEER_FAILED_VERIFICATION ||
+                 res == CURLE_SSL_CONNECT_ERROR ? "tls"
+                 : res == CURLE_UNSUPPORTED_PROTOCOL ? "redirect"
+                 : res == CURLE_OPERATION_TIMEDOUT ? "timeout" : "network",
+                 (int)res, http_code);
         free(out->data);
         out->data = NULL;
         out->size = 0;
         return -1;
     }
+    set_last(http_code >= 400 ? "http_status" : "", 0, http_code);
     return 0;
 }
 
@@ -1094,10 +1133,18 @@ patchdl_fetch_manifest(const char *manifest_url, patchdl_manifest_t *out) {
     memset(&buf, 0, sizeof(buf));
     buf.max = PATCHDL_BUF_MAX_MANIFEST;
     if (patchdl_http_get(manifest_url, &buf)) return -1;
-    if (!buf.data || !buf.size) { free(buf.data); return -1; }
+    if (!buf.data || !buf.size) {
+        free(buf.data);
+        if (!g_last.step[0]) set_last("empty_reply", 0, g_last.http_code);
+        return -1;
+    }
 
     pieces = strstr(buf.data, "\"pieces\"");
-    if (!pieces || !(pieces = strchr(pieces, '['))) { free(buf.data); return -1; }
+    if (!pieces || !(pieces = strchr(pieces, '['))) {
+        free(buf.data);
+        if (!g_last.step[0]) set_last("bad_manifest", 0, g_last.http_code);
+        return -1;
+    }
     pieces_end = strchr(pieces, ']');
 
     for (p = pieces; (p = strstr(p, "\"url\"")) && (!pieces_end || p < pieces_end); p += 5)
@@ -1224,6 +1271,19 @@ patchdl_http_get(const char *url, patchdl_buf_t *out) {
     (void)url;
     (void)out;
     return -1; /* curl not available in this build; set CURL_DIR= to enable */
+}
+
+int
+patchdl_resolve_host(const char *host, char *ip_out, size_t ip_sz) {
+    (void)host; (void)ip_out; (void)ip_sz;
+    return -1;
+}
+
+void
+patchdl_http_last_error(char *step, size_t step_sz, int *curl_rc, long *http_code) {
+    if (step && step_sz) snprintf(step, step_sz, "no_curl");
+    if (curl_rc) *curl_rc = 0;
+    if (http_code) *http_code = 0;
 }
 
 int
