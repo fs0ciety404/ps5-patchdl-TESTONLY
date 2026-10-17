@@ -10,6 +10,7 @@
 #include "patchdl_dns.h"
 
 #include <arpa/inet.h>
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -144,15 +145,19 @@ is_sinkhole(const uint8_t a[4]) {
            (a[0] == 100 && (a[1] & 0xC0) == 64);
 }
 
+/* q/qlen: the query sent; the reply must repeat its question. */
 static int
-parse_answer(const uint8_t *r, size_t n, uint16_t id, patchdl_dns_answer_t *out,
-             char *sinkhole_ip, size_t sinkhole_sz) {
+parse_answer(const uint8_t *r, size_t n, uint16_t id, const uint8_t *q, size_t qlen,
+             patchdl_dns_answer_t *out, char *sinkhole_ip, size_t sinkhole_sz) {
     size_t   pos = 12;
     uint16_t qd, an;
 
     out->n = 0;
     if (n < 12) return ANS_MALFORMED;
     if (((r[0] << 8) | r[1]) != id || !(r[2] & 0x80)) return ANS_MALFORMED;
+    if (n < qlen) return ANS_MALFORMED;
+    for (size_t i = 12; i < qlen; i++)   /* some resolvers change the case */
+        if (tolower(r[i]) != tolower(q[i])) return ANS_MALFORMED;
     if (r[2] & 0x02) return ANS_TRUNCATED;
     if ((r[3] & 0x0F) == 3) return ANS_NXDOMAIN;
     if (r[3] & 0x0F) return ANS_RCODE;
@@ -209,10 +214,11 @@ trail_add(char *trail, size_t sz, const char *fmt, const char *a, const char *b)
 /* Shared tail of every transport: parse, log the outcome, 0 on a usable
    answer. */
 static int
-finish(const uint8_t *resp, size_t n, uint16_t id, patchdl_dns_answer_t *out,
-       const char *label, char *trail, size_t trail_sz, int *truncated) {
+finish(const uint8_t *resp, size_t n, uint16_t id, const uint8_t *q, size_t qlen,
+       patchdl_dns_answer_t *out, const char *label, char *trail, size_t trail_sz,
+       int *truncated) {
     char sink[16] = "";
-    int  rc = parse_answer(resp, n, id, out, sink, sizeof sink);
+    int  rc = parse_answer(resp, n, id, q, qlen, out, sink, sizeof sink);
     if (truncated) *truncated = (rc == ANS_TRUNCATED);
     if (rc == ANS_OK) return 0;
     if (rc == ANS_SINKHOLE) trail_add(trail, trail_sz, "%s: blocked (%s)", label, sink);
@@ -257,7 +263,7 @@ query_udp(const char *server, const char *host, patchdl_dns_answer_t *out,
         if (n < 0) break;
         if (n >= 2 && ((resp[0] << 8) | resp[1]) == id) {
             close(fd);
-            if (!finish(resp, (size_t)n, id, out, label, trail, trail_sz, truncated)) {
+            if (!finish(resp, (size_t)n, id, q, (size_t)qlen, out, label, trail, trail_sz, truncated)) {
                 snprintf(out->source, sizeof out->source, "%s", label);
                 return 0;
             }
@@ -336,7 +342,7 @@ query_tcp(const char *server, const char *host, patchdl_dns_answer_t *out,
         return -1;
     }
     close(fd);
-    if (finish(resp, rlen, id, out, label, trail, trail_sz, NULL)) return -1;
+    if (finish(resp, rlen, id, q + 2, (size_t)qlen, out, label, trail, trail_sz, NULL)) return -1;
     snprintf(out->source, sizeof out->source, "%s", label);
     return 0;
 }
@@ -413,7 +419,7 @@ query_doh(const char *name, const char *ip, const char *host,
         char code[16];
         snprintf(code, sizeof code, "http %ld", http);
         trail_add(trail, trail_sz, "%s: %s", label, code);
-    } else if (!finish(buf->data, buf->len, id, out, label, trail, trail_sz, NULL)) {
+    } else if (!finish(buf->data, buf->len, id, q, (size_t)qlen, out, label, trail, trail_sz, NULL)) {
         snprintf(out->source, sizeof out->source, "%s", label);
         rc = 0;
     }
@@ -580,10 +586,19 @@ patchdl_dns_lookup(const char *host, patchdl_dns_answer_t *out) {
 
     pthread_mutex_lock(&g_mtx);
     /* One lookup per host at a time: the download workers all want the same
-       CDN host at once, and the others wait for its answer. */
+       CDN host at once, and the others wait for its answer. While an answer
+       that merely aged out is being renewed, they keep using it instead: with
+       plain DNS blocked a renewal takes seconds. An answer dropped after a
+       failure (expires == 0) is not reused. */
     for (;;) {
         s = slot_find(host);
         if (!s || !s->inflight) break;
+        if (s->ok && s->expires) {
+            s->used = now_s();
+            *out = s->ans;
+            pthread_mutex_unlock(&g_mtx);
+            return 0;
+        }
         pthread_cond_wait(&g_cv, &g_mtx);
     }
     if (s && s->expires > now_s()) {

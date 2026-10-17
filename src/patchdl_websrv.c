@@ -1299,6 +1299,14 @@ build_downloads_json(void) {
         jbuf_append(&j, ",\"state\":");     jbuf_append_str(&j, job_state_str(job->state));
         jbuf_appendf(&j, ",\"progress\":%d", progress);
         if (job->verifying) jbuf_append(&j, ",\"verifying\":true");
+        if (job->state == JOB_ACTIVE && job->ps) {
+            /* pieces waiting out a pause before their next try */
+            long now = mono_ms();
+            int  waiting = 0;
+            for (int i = 0; i < job->mf.count; i++)
+                if (job->ps[i].state == PC_PENDING && job->ps[i].retry_at > now) waiting++;
+            if (waiting) jbuf_appendf(&j, ",\"waiting\":%d", waiting);
+        }
         jbuf_appendf(&j, ",\"bytes\":%lld,\"total_bytes\":%lld", bytes, total);
         jbuf_appendf(&j, ",\"rc\":%d,\"last_curl_rc\":%d,\"last_http_code\":%ld",
                      job->rc, job->last_curl_rc, job->last_http_code);
@@ -1782,11 +1790,15 @@ next_retry_in_ms(const dl_job_t *job, long now) {
     return best;
 }
 
-/* Wait on the pool condition, but no longer than ms (ms < 0: no limit). */
+/* Wait on the pool condition, but no longer than ms (ms < 0: no limit).
+   The timed wait runs on the wall clock, which the console may set back
+   (time sync); waiting at most a second per call keeps that from parking a
+   retry, since the caller checks the monotonic deadlines again. */
 static void
 pool_wait_locked(long ms) {
     struct timespec ts;
     if (ms < 0) { pthread_cond_wait(&g_pool.cv, &g_pool.mtx); return; }
+    if (ms > 1000) ms = 1000;
     clock_gettime(CLOCK_REALTIME, &ts);
     ts.tv_sec  += ms / 1000;
     ts.tv_nsec += (ms % 1000) * 1000000L;

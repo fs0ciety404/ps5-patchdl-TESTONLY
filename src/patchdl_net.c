@@ -192,8 +192,34 @@ write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
     return total;
 }
 
+static int http_get_once(const char *url, patchdl_buf_t *out);
+
+/* Update lists and manifests: a request that failed on the network is tried
+   twice more after a short pause, each time starting at another CDN address.
+   A single dropped connection then doesn't fail a whole download before its
+   first byte. HTTP errors, TLS failures and refused hosts are final. */
 int
 patchdl_http_get(const char *url, patchdl_buf_t *out) {
+    static const unsigned pause_s[] = { 2, 5 };
+    size_t                max = out->max;
+    int                   rc = -1;
+
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (attempt) {
+            if (strcmp(g_last.step, "connect") && strcmp(g_last.step, "timeout") &&
+                strcmp(g_last.step, "network"))
+                break;
+            sleep(pause_s[attempt - 1]);
+            memset(out, 0, sizeof *out);
+            out->max = max;
+        }
+        if (!(rc = http_get_once(url, out))) break;
+    }
+    return rc;
+}
+
+static int
+http_get_once(const char *url, patchdl_buf_t *out) {
     CURL             *curl;
     CURLcode          res;
     char              host[256];

@@ -166,12 +166,19 @@ patchdl_patchsite_versions(const char *title_id, patchdl_patch_version_t *out,
         json_str_val(entry, "filesize", v->size, sizeof v->size);
         json_str_val(entry, "required_firmware", fw, sizeof fw);
         if (!v->version[0]) continue;
-        if (strchr(fw, '.') && strchr(strchr(fw, '.') + 1, '.')) {
-            /* PS5 style "07.01.01.00": packed like Sony's system_ver */
-            v->fw_bin = fw_str_to_bin(fw);
-            fw_bin_to_display(v->fw_bin, v->required_fw, sizeof v->required_fw);
+        if (strncmp(title_id, "CUSA", 4)) {
+            /* PS5 "07.01.01.00", packed like Sony's system_ver. Without a
+               readable requirement the version counts as needing a newer
+               firmware than any console has: never offer a guess. */
+            if (strchr(fw, '.') && strchr(strchr(fw, '.') + 1, '.')) {
+                v->fw_bin = fw_str_to_bin(fw);
+                fw_bin_to_display(v->fw_bin, v->required_fw, sizeof v->required_fw);
+            } else {
+                v->fw_bin = 0xFFFFFFFFu;
+                snprintf(v->required_fw, sizeof v->required_fw, "?");
+            }
         } else {
-            /* PS4 style "3.00": a PS4 firmware, never a limit on the PS5 */
+            /* PS4 "3.00": a PS4 firmware, never a limit on the PS5 */
             snprintf(v->required_fw, sizeof v->required_fw, "%s", fw);
             v->fw_bin = 0;
         }

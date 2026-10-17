@@ -133,6 +133,7 @@ document.addEventListener("DOMContentLoaded", () => {
   loadInitialData().then(() => { openGuideFromHash(); openDiagFromHash(); });
   window.addEventListener("hashchange", openGuideFromHash);
   setInterval(watchTitles, 5000);
+  watchCoverErrors();
   document.querySelectorAll("[data-donate]").forEach((b) => b.addEventListener("click", openDonate));
   // Cards are re-rendered often; listen once on the document.
   document.addEventListener("click", (e) => {
@@ -174,11 +175,22 @@ function openSheet(html, labelledBy, extraClass = "") {
 }
 
 // The game's icon for a dialog header; initials until it has loaded.
+// A broken icon falls back to the initials (see watchCoverErrors).
 function coverHtml(game, cls) {
   const src = game && game.has_icon ? `/api/icon/${encodeURIComponent(game.title_id)}` : "";
-  return `<div class="cover ${cls}" aria-hidden="true">${src
-    ? `<img src="${src}" alt="" onerror="this.replaceWith(document.createTextNode('${escapeHtml(initials(game.name))}'))">`
-    : escapeHtml(initials(game ? game.name : ""))}</div>`;
+  const ini = escapeHtml(initials(game ? game.name : ""));
+  return `<div class="cover ${cls}" aria-hidden="true" data-initials="${ini}">${src
+    ? `<img src="${src}" alt="">` : ini}</div>`;
+}
+
+// Image errors don't bubble; catch them on the way down instead.
+function watchCoverErrors() {
+  document.addEventListener("error", (e) => {
+    const img = e.target;
+    if (img.tagName !== "IMG" || !img.parentElement) return;
+    const cover = img.parentElement;
+    if (cover.dataset.initials !== undefined) cover.textContent = cover.dataset.initials;
+  }, true);
 }
 
 /* ---------------- other versions ---------------- */
@@ -962,6 +974,7 @@ function progressMetaHtml(d) {
   if (d.state === "queued") return `<span>${t("progress.queued")}</span>`;
   const parts = [];
   if (d.verifying) parts.push(`<span><b>${t("progress.verifying")}</b></span>`);
+  if (d.waiting && !(Number(d._speed) > 0)) parts.push(`<span><b>${t("progress.retrying")}</b></span>`);
   parts.push(`<span><b>${formatBytes(done)}</b>${total > 0 ? ` / ${formatBytes(total)}` : ""}</span>`);
   if (speed > 0) parts.push(`<span><b>${formatBytes(speed)}/s</b></span>`);
   if (speed > 0 && total > done) parts.push(`<span>${t("progress.eta", { eta: formatEta((total - done) / speed) })}</span>`);
@@ -1912,7 +1925,9 @@ function openGuideFromHash() {
   if (!game) { showToast(t("toast.notInstalled")); clearGuideHash(); return; }
   if (m[2]) {
     // a version picked under "Other versions" on the console
-    const pick = pickFor(game, m[2], decodeURIComponent(m[3] || ""));
+    let size = m[3] || "";
+    try { size = decodeURIComponent(size); } catch (_) { /* keep it as it came */ }
+    const pick = pickFor(game, m[2], size);
     if (!canPickVersion(game, pick.version)) {
       showToast(t("toast.alreadyOnWay", { name: game.name }));
       clearGuideHash();
