@@ -31,7 +31,7 @@ SRCS := src/main.c \
 # assets must trigger a rebuild.
 TILE_ASSETS := assets/param.json assets/icon0.png
 
-WEB_ASSETS := web/index.html web/styles.css web/app.js
+WEB_ASSETS := web/index.html web/styles.css web/i18n.js web/app.js
 GEN_SRCS := $(patsubst web/%,gen/web/%.c,$(WEB_ASSETS))
 
 SQLITE_DIR := vendor/sqlite

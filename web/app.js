@@ -13,13 +13,22 @@ const API = {
 // title_id -> loaded <img>, so re-rendered cards show icons instantly.
 const iconCache = new Map();
 
+// Labels come from i18n.js: source.<type> and source.<type>.desc.
 const SOURCE_TYPES = {
-  official:    { label: "Official",    className: "ok",       installAllowed: true,  description: "Native console installation" },
-  external:    { label: "External",    className: "external", installAllowed: true,  description: "Real external installation" },
-  shadowmount: { label: "Shadowmount", className: "shadow",   installAllowed: false, description: "Not supported" },
-  unknown:     { label: "Unknown",     className: "blocked",  installAllowed: false, description: "Blocked" },
-  fake:        { label: "Fake package", className: "blocked", installAllowed: false, description: "Not supported" },
+  official:    { className: "ok",       installAllowed: true  },
+  external:    { className: "external", installAllowed: true  },
+  shadowmount: { className: "shadow",   installAllowed: false },
+  unknown:     { className: "blocked",  installAllowed: false },
+  fake:        { className: "blocked",  installAllowed: false },
 };
+function sourceLabel(type) { return t(`source.${type}`); }
+function sourceDescription(type) { return t(`source.${type}.desc`); }
+
+// Text for a code from a server/state map: <prefix><code> if translated,
+// else the fallback.
+function tCode(prefix, code, fallbackText) {
+  return code && tHas(prefix + code) ? t(prefix + code) : fallbackText;
+}
 
 const fallback = {
   status: {
@@ -117,7 +126,9 @@ const dlMeta = {}; // per-title speed tracking: { bytes, t, speed }
 const els = {};
 
 document.addEventListener("DOMContentLoaded", () => {
+  applyI18n();
   bindElements();
+  fillLanguageSelect();
   bindEvents();
   loadInitialData().then(() => { openGuideFromHash(); openDiagFromHash(); });
   window.addEventListener("hashchange", openGuideFromHash);
@@ -135,12 +146,6 @@ document.addEventListener("DOMContentLoaded", () => {
 
 /* ---------------- other versions ---------------- */
 
-const VERSION_STATE_TEXT = {
-  installed: "installed",
-  older: "older than installed",
-  needs_fw: "needs a newer firmware",
-};
-
 // Every version Prospero (PS5) or Orbis (PS4) lists for a game. Versions
 // newer than the installed one that run on this console can be picked; the
 // guide then fetches the link for exactly that version.
@@ -154,13 +159,13 @@ async function openVersions(titleId) {
     <section class="guide" role="dialog" aria-modal="true" aria-labelledby="verTitle">
       <header class="guide-head">
         <div>
-          <p class="eyebrow">Other versions</p>
+          <p class="eyebrow">${t("versions.title")}</p>
           <h2 id="verTitle">${escapeHtml(game.name)}</h2>
-          <p class="guide-game">Installed ${escapeHtml(game.installed_version || "?")}</p>
+          <p class="guide-game">${escapeHtml(t("card.installed", { version: game.installed_version || "?" }))}</p>
         </div>
-        <button class="icon-button guide-close" type="button" aria-label="Close">×</button>
+        <button class="icon-button guide-close" type="button" aria-label="${escapeHtml(t("common.close"))}">×</button>
       </header>
-      <div class="diag-body"><p class="guide-why">Loading the version list…</p></div>
+      <div class="diag-body"><p class="guide-why">${t("versions.loading")}</p></div>
     </section>`;
   const close = () => {
     document.removeEventListener("keydown", onKey);
@@ -178,18 +183,18 @@ async function openVersions(titleId) {
   if (!document.contains(wrap)) return;
   const body = wrap.querySelector(".diag-body");
   if (!data || !data.ok) {
-    body.innerHTML = `<p class="guide-why">The version list couldn't be loaded. Try again in a moment.</p>`;
+    body.innerHTML = `<p class="guide-why">${t("versions.loadFailed")}</p>`;
     return;
   }
   const rows = (data.versions || []).slice().sort((a, b) => (a.version < b.version ? 1 : -1));
   body.innerHTML = `
-    <p class="guide-why">From <a href="${escapeHtml(data.page)}" target="_blank" rel="noopener">${escapeHtml(data.site)}</a>. Pick a version to get it straight from Sony. Older versions than the installed one can't be installed over it.</p>
+    <p class="guide-why">${t("versions.intro", { site: `<a href="${escapeHtml(data.page)}" target="_blank" rel="noopener">${escapeHtml(data.site)}</a>` })}</p>
     <ul class="version-list">${rows.map((r) => `
       <li class="version-row${r.state === "ok" ? "" : " is-off"}">
         <span><strong>${escapeHtml(r.version)}</strong><br>
-          <em>${escapeHtml(r.size || "")}${!data.ps4 && r.fw ? ` · FW ${escapeHtml(r.fw)}` : ""}${r.state !== "ok" ? ` · ${escapeHtml(VERSION_STATE_TEXT[r.state] || r.state)}` : ""}</em></span>
-        ${r.state === "ok" ? `<button type="button" class="row-button is-update" data-pick="${escapeHtml(r.version)}" data-size="${escapeHtml(r.size || "")}">Get</button>` : ""}
-      </li>`).join("") || `<li class="storage-empty">No versions listed.</li>`}</ul>`;
+          <em>${escapeHtml(r.size || "")}${!data.ps4 && r.fw ? ` · FW ${escapeHtml(r.fw)}` : ""}${r.state !== "ok" ? ` · ${escapeHtml(tCode("versions.state.", r.state, r.state))}` : ""}</em></span>
+        ${r.state === "ok" ? `<button type="button" class="row-button is-update" data-pick="${escapeHtml(r.version)}" data-size="${escapeHtml(r.size || "")}">${t("versions.get")}</button>` : ""}
+      </li>`).join("") || `<li class="storage-empty">${t("versions.none")}</li>`}</ul>`;
   body.querySelectorAll("[data-pick]").forEach((btn) => btn.addEventListener("click", () => {
     close();
     openGuide(game, false, pickFor(game, btn.dataset.pick, btn.dataset.size));
@@ -241,13 +246,13 @@ async function openDiag(titleId) {
     <section class="guide" role="dialog" aria-modal="true" aria-labelledby="diagTitle">
       <header class="guide-head">
         <div>
-          <p class="eyebrow">Download problem</p>
+          <p class="eyebrow">${t("diag.eyebrow")}</p>
           <h2 id="diagTitle">${escapeHtml(name)}</h2>
           <p class="guide-game">${escapeHtml(titleId)}</p>
         </div>
-        <button class="icon-button guide-close" type="button" aria-label="Close">×</button>
+        <button class="icon-button guide-close" type="button" aria-label="${escapeHtml(t("common.close"))}">×</button>
       </header>
-      <div class="diag-body"><p class="guide-why">Checking the connection to Sony's servers…</p></div>
+      <div class="diag-body"><p class="guide-why">${t("diag.checking")}</p></div>
     </section>`;
   const close = () => {
     document.removeEventListener("keydown", onKey);
@@ -271,20 +276,21 @@ async function openDiag(titleId) {
   if (!document.contains(wrap)) return;
   const job = (downloads || []).find((d) => d.title_id === titleId) || null;
   const ul = check && check.update_list, mf = check && check.manifest;
-  const mfDetail = !mf ? "" : mf.ok && mf.step === "direct" ? "Single package, no list needed." :
-    mf.ok ? `${mf.pieces} piece(s)` :
+  const mfDetail = !mf ? "" : mf.ok && mf.step === "direct" ? t("diag.singlePackage") :
+    mf.ok ? t("diag.pieces", { count: mf.pieces }) :
     mf.url ? failStepText({ fail_step: mf.step || "manifest", last_http_code: mf.http }) :
-    "No package for this firmware.";
+    t("diag.noPackage");
   const rows = [
-    diagRow(Boolean(ul && ul.ok), "Update list from Sony",
-      !ul ? "No answer from PatchDL."
-        : ul.ok ? `Newest: ${ul.latest || "?"}`
-        : !ul.url ? "PatchDL knows no update address for this game."
+    diagRow(Boolean(ul && ul.ok), t("diag.updateList"),
+      !ul ? t("diag.noAnswer")
+        : ul.ok ? t("diag.newest", { version: ul.latest || "?" })
+        : !ul.url ? t("diag.noUpdateUrl")
         : failStepText({ fail_step: ul.step || "network", last_http_code: ul.http })),
-    diagRow(Boolean(mf && mf.ok), "Package list (manifest)", mfDetail),
+    diagRow(Boolean(mf && mf.ok), t("diag.manifest"), mfDetail),
   ];
-  if (job) rows.push(diagRow(job.state !== "error", "Last download",
-    job.state === "error" ? (job.fail_step ? failStepText(job) : "Failed while downloading the pieces.") : job.state));
+  if (job) rows.push(diagRow(job.state !== "error", t("diag.lastDownload"),
+    job.state === "error" ? (job.fail_step ? failStepText(job) : t("diag.failedPieces"))
+      : tCode("diag.jobState.", job.state, job.state)));
 
   const report = [
     "PatchDL diagnostic report",
@@ -294,7 +300,7 @@ async function openDiag(titleId) {
     `Network check: ${check ? JSON.stringify(check) : "unavailable"}`,
     `Install: ${inst ? JSON.stringify(inst.streams || inst) : "unavailable"}`,
     `Console requests: ${pkg && pkg.log ? pkg.log.slice(-8).join(" | ") : "none"}`,
-    ...(state.logs.length ? ["Log:", ...state.logs.slice(-15)] : []),
+    ...(state.logs.length ? ["Log:", ...state.logs.slice(-15).map((e) => logLine(e, tEn))] : []),
   ].join("\n");
 
   const onConsole = isConsoleBrowser();
@@ -304,16 +310,16 @@ async function openDiag(titleId) {
     <ul class="diag-list">${rows.join("")}</ul>
     ${onConsole
       ? (matrix ? `<div class="guide-qr">${qrSvg(matrix)}<div>
-          <span>To report this, scan with your phone. The same report opens there, ready to copy.</span></div></div>` : "")
-      : `<p class="guide-why">To report this, copy the report and paste it into a GitHub issue.</p>`}
-    <textarea class="diag-report" readonly rows="8" aria-label="Diagnostic report">${escapeHtml(report)}</textarea>
-    ${onConsole ? "" : `<button type="button" class="row-button is-update diag-copy">Copy report</button>`}`;
+          <span>${t("diag.reportPhone")}</span></div></div>` : "")
+      : `<p class="guide-why">${t("diag.reportHint")}</p>`}
+    <textarea class="diag-report" readonly rows="8" aria-label="${t("diag.reportAria")}">${escapeHtml(report)}</textarea>
+    ${onConsole ? "" : `<button type="button" class="row-button is-update diag-copy">${t("diag.copy")}</button>`}`;
   const copy = wrap.querySelector(".diag-copy");
   if (copy) copy.addEventListener("click", async () => {
     const ta = wrap.querySelector(".diag-report");
     try { await navigator.clipboard.writeText(report); }
     catch (_) { ta.select(); document.execCommand("copy"); }
-    showToast("Report copied.");
+    showToast(t("diag.copied"));
   });
 }
 
@@ -330,17 +336,17 @@ function openDonate() {
     <section class="guide" role="dialog" aria-modal="true" aria-labelledby="donateTitle">
       <header class="guide-head">
         <div>
-          <p class="eyebrow">Support PatchDL</p>
-          <h2 id="donateTitle">Buy me a coffee</h2>
+          <p class="eyebrow">${t("donate.eyebrow")}</p>
+          <h2 id="donateTitle">${t("donate.title")}</h2>
         </div>
-        <button class="icon-button guide-close" type="button" aria-label="Close">×</button>
+        <button class="icon-button guide-close" type="button" aria-label="${escapeHtml(t("common.close"))}">×</button>
       </header>
-      <p class="guide-why">If you like what I do, you can buy me a coffee.</p>
+      <p class="guide-why">${t("donate.why")}</p>
       ${matrix ? `<div class="guide-qr">${qrSvg(matrix)}<div>
-        <span>Scan with your phone to open PayPal:</span>
+        <span>${t("donate.scan")}</span>
         <code>${escapeHtml(DONATE_URL)}</code></div></div>` : ""}
-      <a class="row-button is-update donate-open" href="${DONATE_URL}" target="_blank" rel="noopener">Open PayPal</a>
-      <p class="guide-why"><small>It doesn't have to be a generous donation. A few cents are enough to show me who is interested in further development. So the motivation stays and I just know that I am not programming for the bin ;)</small></p>
+      <a class="row-button is-update donate-open" href="${DONATE_URL}" target="_blank" rel="noopener">${t("donate.open")}</a>
+      <p class="guide-why"><small>${escapeHtml(t("donate.small"))}</small></p>
     </section>`;
   const close = () => {
     document.removeEventListener("keydown", onKey);
@@ -417,6 +423,7 @@ function bindElements() {
     globalDlEta:      document.getElementById("globalDlEta"),
     globalDlBar:      document.getElementById("globalDlBar"),
     saveBtn: document.getElementById("saveBtn"),
+    language: document.getElementById("language"),
     clearLogBtn: document.getElementById("clearLogBtn"),
     toast: document.getElementById("toast"),
   });
@@ -452,6 +459,22 @@ function bindEvents() {
     els.connMinus.addEventListener("click", () => setConnections(clampConn(state.config.max_connections) - 1));
   if (els.connPlus)
     els.connPlus.addEventListener("click", () => setConnections(clampConn(state.config.max_connections) + 1));
+}
+
+// Language selector in Settings: applies at once (reloads the page), no Save.
+function fillLanguageSelect() {
+  const sel = document.getElementById("language");
+  if (!sel) return;
+  const current = languageChoice();
+  sel.replaceChildren(...LANGUAGES.map(([code, name]) => {
+    const opt = document.createElement("option");
+    opt.value = code;
+    opt.textContent = code === "auto" ? t("settings.languageAuto") : name;
+    if (code !== "auto") opt.lang = code;
+    opt.selected = code === current;
+    return opt;
+  }));
+  sel.addEventListener("change", () => setLanguage(sel.value));
 }
 
 function setView(view) {
@@ -515,7 +538,7 @@ async function loadInitialData({ quiet = false } = {}) {
   // Pick up installs that are running while this page was (re)loaded.
   if (!quiet) refreshInstallStatus();
   if (!quiet)
-    showToast(state.usingFallback ? "Demo data loaded. API is not reachable yet." : "Data refreshed.");
+    showToast(state.usingFallback ? t("toast.demoData") : t("toast.refreshed"));
 }
 
 async function getJson(url, fallbackValue) {
@@ -538,7 +561,7 @@ function render() {
 
 function renderStatus() {
   els.firmwareValue.textContent = state.status.firmware || "--";
-  els.firmwareBuild.textContent = state.status.firmware_build || "System version";
+  els.firmwareBuild.textContent = state.status.firmware_build || t("metric.firmwareBuild");
   els.dnsValue.textContent = state.status.dns_guard || "--";
   els.resolverValue.textContent = state.status.resolver || "--";
   const space = formatMb(state.status.free_space_mb);
@@ -547,13 +570,13 @@ function renderStatus() {
   if (kept > 0) {
     // Packages on disk take space too; the link opens the list to manage them.
     els.downloadDirValue.innerHTML =
-      `<button type="button" class="link-button">${formatBytes(kept)} in downloads · manage</button>`;
+      `<button type="button" class="link-button">${escapeHtml(t("metric.downloadsManage", { size: formatBytes(kept) }))}</button>`;
     els.downloadDirValue.querySelector("button").addEventListener("click", () => setView("settings"));
   } else {
-    els.downloadDirValue.textContent = state.status.download_dir || state.config.download_dir || "Download target";
+    els.downloadDirValue.textContent = state.status.download_dir || state.config.download_dir || t("metric.downloadTarget");
   }
   if (els.railFw) els.railFw.textContent = `FW ${state.status.firmware || "--"}`;
-  if (els.railSpace) els.railSpace.textContent = `${space} free`;
+  if (els.railSpace) els.railSpace.textContent = t("rail.free", { space });
   if (els.brandVersion)
     els.brandVersion.textContent = state.status.version ? `v${state.status.version}` : "v--";
 }
@@ -585,9 +608,9 @@ function setConnections(n) {
   connSaveTimer = setTimeout(async () => {
     try {
       await postJson(API.config, { max_connections: v });
-      showToast(`Parallel connections: ${v}`);
+      showToast(t("toast.connections", { count: v }));
     } catch (e) {
-      showToast("Could not save connections — API not reachable.");
+      showToast(t("toast.connectionsFailed"));
     }
   }, 450);
 }
@@ -626,7 +649,7 @@ function renderGames() {
   if (!visible.length) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
-    empty.textContent = "No titles match this filter.";
+    empty.textContent = t("games.empty");
     els.gameGrid.appendChild(empty);
     return;
   }
@@ -711,13 +734,13 @@ function createGameCard(game) {
       <span>${escapeHtml(game.content_id || "")}</span>
     </div>
     <div class="pills">
-      ${game.downloading && game._jobState === "queued" ? `<span class="pill">Queued</span>` : ""}
-      ${game.downloading && game._jobState !== "queued" ? `<span class="pill live">Downloading</span>` : ""}
-      ${game.resumable && !game.downloading ? `<span class="pill warn">Paused</span>` : ""}
+      ${game.downloading && game._jobState === "queued" ? `<span class="pill">${t("pill.queued")}</span>` : ""}
+      ${game.downloading && game._jobState !== "queued" ? `<span class="pill live">${t("pill.downloading")}</span>` : ""}
+      ${game.resumable && !game.downloading ? `<span class="pill warn">${t("pill.paused")}</span>` : ""}
       ${statusPill(game)}
       ${sourcePill(game)}
       ${isPs4(game) ? `<span class="pill">PS4</span>` : ""}
-      ${game.sideloaded ? `<span class="pill warn" title="Installed outside the Store, disc or PatchDL">Sideloaded</span>` : ""}
+      ${game.sideloaded ? `<span class="pill warn" title="${escapeHtml(t("pill.sideloadedTitle"))}">${t("pill.sideloaded")}</span>` : ""}
     </div>
     <div class="versions">${versionsHtml(game)}</div>
   `;
@@ -764,8 +787,8 @@ function createGameCard(game) {
     note.className = "card-progress";
     note.innerHTML = `
       <div class="progress-meta">
-        <span>Paused — <b>${formatBytes(game.partial_bytes)}</b> downloaded</span>
-        <span>Resume to continue</span>
+        <span>${t("card.pausedDownloaded", { size: formatBytes(game.partial_bytes) })}</span>
+        <span>${t("card.resumeToContinue")}</span>
       </div>
     `;
     card.appendChild(note);
@@ -780,14 +803,14 @@ function buildToggle(game) {
   const cb = document.createElement("input");
   cb.type = "checkbox";
   cb.checked = game.enabled !== false;
-  cb.setAttribute("aria-label", `Enable updates for ${game.name}`);
+  cb.setAttribute("aria-label", t("card.enableAria", { name: game.name }));
   const track = document.createElement("span");
   track.className = "track";
   const lbl = document.createElement("span");
   lbl.className = "label";
-  lbl.textContent = cb.checked ? "Updates on" : "Updates off";
+  lbl.textContent = cb.checked ? t("card.updatesOn") : t("card.updatesOff");
   cb.addEventListener("change", () => {
-    lbl.textContent = cb.checked ? "Updates on" : "Updates off";
+    lbl.textContent = cb.checked ? t("card.updatesOn") : t("card.updatesOff");
     updateGame(game.title_id, { enabled: cb.checked });
   });
   toggle.append(cb, track, lbl);
@@ -797,22 +820,22 @@ function buildToggle(game) {
 // Primary play/pause button (green to go, amber while downloading). Fixed width
 // (CSS) so the label never reflows. Returns null when there is nothing to do.
 function primaryButton(game) {
-  if (game.installing) return { label: "Installing…", variant: "ghost", disabled: true };
-  if (game.downloading) return { label: "Pause", action: "pause", variant: "pause", hint: "Pause the download (keeps what was downloaded)." };
+  if (game.installing) return { label: t("btn.installing"), variant: "ghost", disabled: true };
+  if (game.downloading) return { label: t("btn.pause"), action: "pause", variant: "pause", hint: t("btn.pauseHint") };
   if (game.patch_title_match === false) return null;
   if (canGetOlderPatch(game))
-    return { label: "Old FW patch", action: "guide", variant: "update", hint: `Get ${game.prospero_version} from Prospero Patches, the newest patch that runs on this firmware.` };
+    return { label: t("btn.oldFw"), action: "guide", variant: "update", hint: t("btn.oldFwHint", { version: game.prospero_version }) };
   if (game.resumable && isDownloadAllowed(game))
-    return { label: "Resume", action: "download", variant: "update", hint: "Continue the paused download where it stopped." };
+    return { label: t("btn.resume"), action: "download", variant: "update", hint: t("btn.resumeHint") };
   const hasPatch = game.status === "available" || Boolean(game.manual_version);
   if (game.downloaded && hasPatch && isInstallAllowed(game))
-    return { label: "Install", action: "install", variant: "update", hint: "Install the downloaded patch (modifies the game)." };
+    return { label: t("btn.install"), action: "install", variant: "update", hint: t("btn.installHint") };
   if (game.downloaded && hasPatch) return null;
   if (!hasPatch) return null;
   if (!isDownloadAllowed(game)) return null;
   return state.config.install_after_download && isInstallAllowed(game)
-    ? { label: "Update", action: "update", variant: "update", hint: "Download and install the update." }
-    : { label: "Download", action: "download", variant: "update", hint: "Download the patch internally." };
+    ? { label: t("btn.update"), action: "update", variant: "update", hint: t("btn.updateHint") }
+    : { label: t("btn.download"), action: "download", variant: "update", hint: t("btn.downloadHint") };
 }
 
 // Red stop button: present whenever there is a download to stop or discard.
@@ -820,9 +843,9 @@ function primaryButton(game) {
 function stopButton(game) {
   if (game.installing) return null;
   if (game.downloaded && !game.downloading)
-    return { label: "Delete", action: "cancel", variant: "cancel", hint: "Delete the downloaded package to free space." };
+    return { label: t("btn.delete"), action: "cancel", variant: "cancel", hint: t("btn.deleteHint") };
   if (game.downloading || game.resumable)
-    return { label: "Cancel", action: "cancel", variant: "cancel", hint: "Stop and delete the download." };
+    return { label: t("btn.cancel"), action: "cancel", variant: "cancel", hint: t("btn.cancelHint") };
   return null;
 }
 
@@ -830,55 +853,56 @@ function stopButton(game) {
 // the firmware it needs (left out when it's the same as the offered update).
 function versionsHtml(game) {
   const v = (x) => `<b>${escapeHtml(x)}</b>`;
-  const parts = [`<span>Installed ${v(game.installed_version || "--")}</span>`];
+  const parts = [`<span>${t("card.installed", { version: v(game.installed_version || "--") })}</span>`];
   let offered = "";
   if (game.manual_version) {
     offered = game.manual_version;
-    parts.push(`<span>Update ${v(offered)} · from ${isPs4(game) ? "Orbis" : "Prospero"}</span>`);
+    parts.push(`<span>${t("card.updateFrom", { version: v(offered), site: isPs4(game) ? "Orbis" : "Prospero" })}</span>`);
   } else if (game.status === "available" && game.compatible_version) {
     offered = game.compatible_version;
-    parts.push(`<span>Update ${v(offered)}</span>`);
+    parts.push(`<span>${t("card.update", { version: v(offered) })}</span>`);
   } else if (hasOlderPatch(game)) {
     offered = game.prospero_version;
-    const fw = game.prospero_required_fw ? ` · needs FW ${escapeHtml(game.prospero_required_fw)}` : "";
-    parts.push(`<span class="prospero-line">Update ${v(offered)}${fw} · <a href="https://prosperopatches.com/${encodeURIComponent(game.title_id)}" target="_blank" rel="noopener">Prospero</a></span>`);
+    const fw = game.prospero_required_fw ? ` · ${t("card.needsFw", { fw: escapeHtml(game.prospero_required_fw) })}` : "";
+    parts.push(`<span class="prospero-line">${t("card.update", { version: v(offered) })}${fw} · <a href="https://prosperopatches.com/${encodeURIComponent(game.title_id)}" target="_blank" rel="noopener">Prospero</a></span>`);
   } else if (game.status === "incompatible_fw" && !game.prospero_done) {
-    parts.push(`<span>Looking for a patch for this firmware\u2026</span>`);
+    parts.push(`<span>${t("card.lookingForPatch")}</span>`);
   }
   const job = state.downloads.find((d) => d.title_id === game.title_id);
   if (job && job.state === "error" && Number(job.rc) === -3)
-    parts.push(`<span class="card-note is-warn">${noSpaceText(job.need_bytes, job.free_bytes)}</span>`);
+    parts.push(`<span class="card-note is-warn">${escapeHtml(noSpaceText(job.need_bytes, job.free_bytes))}</span>`);
   else if (job && job.state === "error")
-    parts.push(`<span class="card-note is-warn">Download failed. ${job.fail_step ? escapeHtml(failStepText(job)) + " " : ""}<button type="button" class="link-button" data-diag="${escapeHtml(game.title_id)}">Details</button></span>`);
+    parts.push(`<span class="card-note is-warn">${escapeHtml(t("card.downloadFailed"))} ${job.fail_step ? escapeHtml(failStepText(job)) + " " : ""}<button type="button" class="link-button" data-diag="${escapeHtml(game.title_id)}">${t("card.details")}</button></span>`);
   if (game.latest_version && game.latest_version !== offered) {
-    const fw = game.latest_required_fw ? ` · needs FW ${escapeHtml(game.latest_required_fw)}` : "";
-    parts.push(`<span>Newest ${v(game.latest_version)}${fw}</span>`);
+    const fw = game.latest_required_fw ? ` · ${t("card.needsFw", { fw: escapeHtml(game.latest_required_fw) })}` : "";
+    parts.push(`<span>${t("card.newest", { version: v(game.latest_version) })}${fw}</span>`);
   }
   if (canPickVersion(game, "99") && !game.manual_version && game.status !== "blocked")
-    parts.push(`<span><button type="button" class="link-button" data-versions="${escapeHtml(game.title_id)}">Other versions</button></span>`);
+    parts.push(`<span><button type="button" class="link-button" data-versions="${escapeHtml(game.title_id)}">${t("versions.title")}</button></span>`);
   if (game.sideloaded)
-    parts.push(`<span class="card-note is-warn">Installed outside the Store. An update replaces this exact version, which some tools depend on. Switch on Updates only if you want that.</span>`);
+    parts.push(`<span class="card-note is-warn">${escapeHtml(t("card.sideloadedNote"))}</span>`);
   return parts.join("");
 }
 
 function statusPill(game) {
-  if (game.installing) return `<span class="pill warn">Installing…</span>`;
-  if (game.status === "checking") return `<span class="pill">Checking…</span>`;
+  if (game.installing) return `<span class="pill warn">${t("pill.installing")}</span>`;
+  if (game.status === "checking") return `<span class="pill">${t("pill.checking")}</span>`;
   if (game.status === "blocked" || !sourcePolicy(game).allow_install)
-    return `<span class="pill">Not supported</span>`;
-  if (game.patch_title_match === false) return `<span class="pill blocked">Title mismatch</span>`;
+    return `<span class="pill">${t("pill.notSupported")}</span>`;
+  if (game.patch_title_match === false) return `<span class="pill blocked">${t("pill.titleMismatch")}</span>`;
   if (game.manual_version || hasOlderPatch(game))
-    return `<span class="pill prospero">Via ${isPs4(game) ? "Orbis" : "Prospero"}</span>`;
-  if (game.status === "available") return `<span class="pill ok">Update available</span>`;
+    return `<span class="pill prospero">${t("pill.via", { site: isPs4(game) ? "Orbis" : "Prospero" })}</span>`;
+  if (game.status === "available") return `<span class="pill ok">${t("pill.available")}</span>`;
   if (game.status === "incompatible_fw")
-    return `<span class="pill">Newest needs FW ${escapeHtml(game.latest_required_fw || "?")}</span>`;
-  if (game.status === "up_to_date") return `<span class="pill">Up to date</span>`;
-  return `<span class="pill">No patch info</span>`;
+    return `<span class="pill">${t("pill.newestNeedsFw", { fw: escapeHtml(game.latest_required_fw || "?") })}</span>`;
+  if (game.status === "up_to_date") return `<span class="pill">${t("pill.upToDate")}</span>`;
+  return `<span class="pill">${t("pill.noInfo")}</span>`;
 }
 
 function sourcePill(game) {
   const info = sourceInfo(game);
-  return `<span class="pill ${info.className}">${escapeHtml(info.label)}</span>`;
+  const type = SOURCE_TYPES[sourceType(game)] ? sourceType(game) : "unknown";
+  return `<span class="pill ${info.className}">${escapeHtml(sourceLabel(type))}</span>`;
 }
 function sourceInfo(game) { return SOURCE_TYPES[sourceType(game)] || SOURCE_TYPES.unknown; }
 function sourceType(game) { return game.source_type || "unknown"; }
@@ -896,13 +920,13 @@ function progressMetaHtml(d) {
   const done = Number(d.bytes) || 0;
   const total = Number(d.total_bytes) || 0;
   const speed = Number(d._speed) || 0;
-  if (d.state === "queued") return `<span>Queued — waiting for a free slot</span>`;
+  if (d.state === "queued") return `<span>${t("progress.queued")}</span>`;
   const parts = [];
-  if (d.verifying) parts.push(`<span><b>Checking the package already on disk</b></span>`);
+  if (d.verifying) parts.push(`<span><b>${t("progress.verifying")}</b></span>`);
   parts.push(`<span><b>${formatBytes(done)}</b>${total > 0 ? ` / ${formatBytes(total)}` : ""}</span>`);
   if (speed > 0) parts.push(`<span><b>${formatBytes(speed)}/s</b></span>`);
-  if (speed > 0 && total > done) parts.push(`<span>ETA <b>${formatEta((total - done) / speed)}</b></span>`);
-  else if (!total) parts.push(`<span>Fetching manifest…</span>`);
+  if (speed > 0 && total > done) parts.push(`<span>${t("progress.eta", { eta: formatEta((total - done) / speed) })}</span>`);
+  else if (!total) parts.push(`<span>${t("progress.fetchingManifest")}</span>`);
   parts.push(`<span><b>${pctOf(d)}%</b></span>`);
   return parts.join("");
 }
@@ -912,17 +936,14 @@ function progressMetaHtml(d) {
 // where the old one was instead of starting over.
 const INDET_MS = 1600;
 
-const INSTALL_PHASE_TEXT = {
-  waiting: "Waiting for the console",
-  reading: "Console reading package",
-  finishing: "Finishing on console",
-};
+// Install phases with their own text (install.phase.<status> in i18n.js).
+const INSTALL_PHASES = ["waiting", "reading", "finishing"];
 
 function installProgressHtml(game) {
   const status = game.installStatus || "waiting";
   const done = Number(game.installDone) || 0;
   const total = Number(game.installTotal) || 0;
-  const phase = INSTALL_PHASE_TEXT[status];
+  const phase = INSTALL_PHASES.includes(status) ? t(`install.phase.${status}`) : "";
   if (phase) {
     const parts = [`<span><b>${phase}</b></span>`];
     if (status === "reading" && total > 0) {
@@ -931,7 +952,7 @@ function installProgressHtml(game) {
     }
     return parts.join("");
   }
-  const parts = [`<span>Status <b>${escapeHtml(status)}</b></span>`];
+  const parts = [`<span>${t("install.status", { status: escapeHtml(status) })}</span>`];
   if (total > 0) parts.push(`<span><b>${formatBytes(done)}</b> / ${formatBytes(total)}</span>`);
   parts.push(`<span><b>${Math.max(0, Math.min(100, Number(game.installProgress) || 0))}%</b></span>`);
   return parts.join("");
@@ -1005,13 +1026,13 @@ function reconcileFromJobs(jobs) {
       // red Cancel stays available to delete the kept partial.
       const bytes = Number(j.bytes) || 0;
       if (Number(j.rc) === -3) {
-        if (!g._spaceWarned) showToast(`${g.name}: ${noSpaceText(j.need_bytes, j.free_bytes)}`);
+        if (!g._spaceWarned) showToast(t("toast.nameMessage", { name: g.name, message: noSpaceText(j.need_bytes, j.free_bytes) }));
         g._spaceWarned = true;
       } else if (g._wasActive) {
         const why = j.fail_step ? ` ${failStepText(j)}` : "";
-        showToast(`${g.name}: download failed${bytes > 0 ? " — partial kept, press Resume to continue" : "."}${why}`);
+        showToast(t(bytes > 0 ? "toast.downloadFailedPartial" : "toast.downloadFailed", { name: g.name, why }));
         if (j.fail_step) {
-          state.logs.push(`[${timeNow()}] Download ${g.title_id} failed while fetching the package list: ${j.fail_step} (curl ${j.last_curl_rc}, HTTP ${j.last_http_code})`);
+          addLog("log.fetchFailed", { id: g.title_id, step: j.fail_step, curl: j.last_curl_rc, http: j.last_http_code });
           renderLogs();
         }
       }
@@ -1026,17 +1047,10 @@ function reconcileFromJobs(jobs) {
 // Why the package list (manifest) couldn't be fetched, in words.
 function failStepText(j) {
   const http = Number(j.last_http_code) || 0;
-  return ({
-    dns: "Sony's download server couldn't be found (DNS). Is it blocked on your network?",
-    network: "Couldn't connect to Sony's download server. Is it blocked on your network?",
-    timeout: "Sony's download server didn't answer in time.",
-    tls: "The secure connection to Sony's server failed.",
-    redirect: "Sony's server sent PatchDL somewhere it doesn't follow.",
-    http_status: `Sony's server answered HTTP ${http}.`,
-    bad_manifest: "Sony's server sent something that isn't a package list.",
-    empty_reply: "Sony's server sent an empty reply.",
-    host_not_allowed: "The package is on a server PatchDL doesn't use.",
-  })[j.fail_step] || `Package list unavailable (${j.fail_step}).`;
+  const key = `failstep.${j.fail_step}`;
+  return j.fail_step && j.fail_step !== "unknown" && tHas(key)
+    ? t(key, { http })
+    : t("failstep.unknown", { step: j.fail_step });
 }
 
 function startInstallPolling() {
@@ -1091,12 +1105,12 @@ async function refreshInstallStatus() {
       game.installTotal = total;
       if (over) {
         const msg = st.phase === "stalled"
-          ? "stopped: the console stopped reading the package"
+          ? t("install.msg.stalled")
           : st.verified
-            ? `done and verified${st.deleted ? ", package deleted" : ", package kept"}`
-            : "finished, but the new version could not be confirmed; package kept";
-        state.logs.push(`[${timeNow()}] Install ${game.title_id}: ${msg}.`);
-        showToast(`${game.name}: install ${msg}.`);
+            ? t(st.deleted ? "install.msg.verifiedDeleted" : "install.msg.verifiedKept")
+            : t("install.msg.unconfirmed");
+        addLog("log.installEnded", { id: game.title_id, msg });
+        showToast(t("toast.installEnded", { name: game.name, msg }));
         ended = true;
       }
     });
@@ -1123,7 +1137,11 @@ async function refreshInstallStatus() {
 
   if (s.terminal) {
     const ok = s.status === "playable";
-    state.logs.push(`[${timeNow()}] Install ${ok ? "completed" : "stopped"} for ${game.title_id}: ${s.status || "unknown"}${s.error_code ? ` (0x${Number(s.error_code >>> 0).toString(16)})` : ""}`);
+    addLog(ok ? "log.installCompleted" : "log.installStopped", {
+      id: game.title_id,
+      status: s.status || t("common.unknown"),
+      code: s.error_code ? ` (0x${Number(s.error_code >>> 0).toString(16)})` : "",
+    });
     renderLogs();
     stopInstallPolling();
     if (ok) loadInitialData();
@@ -1197,13 +1215,13 @@ function renderGlobalStatus() {
   const isActive = active && active.state === "active";
 
   // Eyebrow + name
-  els.globalDlState.textContent = !isActive ? "Queued" : active.verifying ? "Verifying" : "Downloading";
+  els.globalDlState.textContent = !isActive ? t("dl.queued") : active.verifying ? t("dl.verifying") : t("dl.downloading");
   els.globalDlName.textContent  = active.name || active.title_id || "—";
 
   // Position chip ("3 of 9") only when there's more than one game in this run
   if (total > 1) {
     els.globalDlPosition.hidden = false;
-    els.globalDlPosition.textContent = `${pos} of ${total}`;
+    els.globalDlPosition.textContent = t("dl.position", { pos, total });
   } else {
     els.globalDlPosition.hidden = true;
   }
@@ -1213,12 +1231,12 @@ function renderGlobalStatus() {
   const speed = Number(active._speed) || 0;
   const done_ = Number(active.bytes) || 0;
   const total_ = Number(active.total_bytes) || 0;
-  els.globalDlPct.innerHTML   = isActive ? `<b>${pct}%</b>` : `<b>—</b> waiting`;
+  els.globalDlPct.innerHTML   = isActive ? `<b>${pct}%</b>` : `<b>—</b> ${t("dl.waiting")}`;
   els.globalDlSpeed.innerHTML = isActive && speed > 0
     ? `<b>${formatBytes(speed)}/s</b>`
-    : (isActive && !total_ ? "fetching manifest…" : "—");
+    : (isActive && !total_ ? t("dl.fetchingManifest") : "—");
   els.globalDlEta.innerHTML = isActive && speed > 0 && total_ > done_
-    ? `ETA <b>${formatEta((total_ - done_) / speed)}</b>`
+    ? t("progress.eta", { eta: formatEta((total_ - done_) / speed) })
     : "";
 
   // Bar: animated indeterminate while fetching manifest, otherwise width=pct
@@ -1252,12 +1270,13 @@ function applyDownloadProgress() {
 
 /* ---------------- settings ---------------- */
 
+// Labels: storage.state.<state> in i18n.js.
 const STORAGE_STATE = {
-  complete: { label: "Complete", className: "ok" },
-  paused: { label: "Paused", className: "warn" },
-  downloading: { label: "Downloading", className: "live" },
-  installing: { label: "Installing", className: "live" },
-  failed: { label: "Failed", className: "blocked" },
+  complete: { className: "ok" },
+  paused: { className: "warn" },
+  downloading: { className: "live" },
+  installing: { className: "live" },
+  failed: { className: "blocked" },
 };
 
 // What PatchDL keeps under /data/patchdl, one row per title folder, with a
@@ -1270,32 +1289,33 @@ async function loadStorage() {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     data = await response.json();
   } catch (error) {
-    els.storageList.innerHTML = `<p class="storage-empty">Could not read the download folder.</p>`;
+    els.storageList.innerHTML = `<p class="storage-empty">${t("storage.readFailed")}</p>`;
     return;
   }
   const items = (data.items || []).sort((a, b) => b.bytes - a.bytes);
-  els.storageTotal.textContent = items.length ? `${formatBytes(data.total_bytes)} in total` : "";
+  els.storageTotal.textContent = items.length ? t("storage.total", { size: formatBytes(data.total_bytes) }) : "";
   if (!items.length) {
-    els.storageList.innerHTML = `<p class="storage-empty">Nothing downloaded.</p>`;
+    els.storageList.innerHTML = `<p class="storage-empty">${t("storage.empty")}</p>`;
     return;
   }
   els.storageList.replaceChildren(...items.map((item) => {
-    const info = STORAGE_STATE[item.state] || STORAGE_STATE.complete;
+    const stateKey = STORAGE_STATE[item.state] ? item.state : "complete";
+    const info = STORAGE_STATE[stateKey];
     const busy = item.state === "installing" || item.state === "downloading";
     const row = document.createElement("div");
     row.className = "storage-row";
     row.innerHTML = `
       <span><strong>${escapeHtml(item.name || item.title_id)}</strong><br>
-        <em>${escapeHtml(item.title_id)}${item.version ? ` · ${escapeHtml(item.version)}` : ""} · ${storageRelation(item)}</em></span>
-      <span class="pill ${info.className}">${info.label}</span>
+        <em>${escapeHtml(item.title_id)}${item.version ? ` · ${escapeHtml(item.version)}` : ""} · ${escapeHtml(storageRelation(item))}</em></span>
+      <span class="pill ${info.className}">${t(`storage.state.${stateKey}`)}</span>
       <b>${formatBytes(item.bytes)}</b>
     `;
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "row-button is-cancel";
-    btn.textContent = "Delete";
+    btn.textContent = t("btn.delete");
     btn.disabled = busy;
-    btn.title = busy ? "Busy right now" : `Delete ${formatBytes(item.bytes)} for ${item.name || item.title_id}`;
+    btn.title = busy ? t("storage.busy") : t("storage.deleteTitle", { size: formatBytes(item.bytes), name: item.name || item.title_id });
     btn.addEventListener("click", () => deleteStorage(item));
     row.appendChild(btn);
     return row;
@@ -1305,19 +1325,19 @@ async function loadStorage() {
 // How the package relates to the installed game, so a kept package can be
 // judged: still useful (newer), spent (installed), or for a game not present.
 function storageRelation(item) {
-  if (!item.installed) return "game not installed";
-  if (!item.version || !item.installed_version) return "version unknown";
-  return item.version > item.installed_version ? "newer than installed" : "already installed";
+  if (!item.installed) return t("storage.rel.notInstalled");
+  if (!item.version || !item.installed_version) return t("storage.rel.versionUnknown");
+  return item.version > item.installed_version ? t("storage.rel.newer") : t("storage.rel.installed");
 }
 
 async function deleteStorage(item) {
   const label = item.name || item.title_id;
-  if (!window.confirm(`Delete the download for ${label} (${formatBytes(item.bytes)})?`)) return;
+  if (!window.confirm(t("storage.confirmDelete", { name: label, size: formatBytes(item.bytes) }))) return;
   try {
     await postJson(API.storageDelete(item.title_id), {});
-    showToast(`${label}: download deleted.`);
+    showToast(t("toast.storageDeleted", { name: label }));
   } catch (error) {
-    showToast(`${label}: ${reasonText(error)}`);
+    showToast(t("toast.nameMessage", { name: label, message: reasonText(error) }));
   }
   await loadStorage();
   await loadInitialData({ quiet: true });
@@ -1330,17 +1350,29 @@ function renderSourcePolicies() {
     const row = document.createElement("div");
     row.className = "policy-row";
     row.innerHTML = `
-      <span class="pill ${info.className}">${escapeHtml(info.label)}</span>
-      <strong>${policy.allow_install ? "Install allowed" : "Install blocked"}</strong>
-      <em>${policy.allow_download ? "Download allowed" : "Download blocked"} - ${escapeHtml(info.description)}</em>
+      <span class="pill ${info.className}">${escapeHtml(sourceLabel(type))}</span>
+      <strong>${t(policy.allow_install ? "policy.installAllowed" : "policy.installBlocked")}</strong>
+      <em>${t(policy.allow_download ? "policy.downloadAllowed" : "policy.downloadBlocked")} - ${escapeHtml(sourceDescription(type))}</em>
     `;
     return row;
   });
   els.sourcePolicyList.replaceChildren(...rows);
 }
 
+// Log entries keep their key and values, so the Logs view shows them in the
+// chosen language while the diagnostic report (pasted into issues) stays
+// English.
+function addLog(key, vars) {
+  state.logs.push({ time: timeNow(), key, vars });
+}
+
+function logLine(entry, tr) {
+  return `[${entry.time}] ${tr(entry.key, entry.vars)}`;
+}
+
 function renderLogs() {
-  els.logOutput.textContent = state.logs.length ? state.logs.join("\n") : "No events yet.";
+  els.logOutput.textContent = state.logs.length
+    ? state.logs.map((e) => logLine(e, t)).join("\n") : t("logs.empty");
 }
 
 async function saveConfig() {
@@ -1357,10 +1389,10 @@ async function saveConfig() {
   try {
     await postJson(API.config, config);
     state.config = config;
-    showToast("Configuration saved.");
+    showToast(t("toast.configSaved"));
   } catch (error) {
     state.config = config;
-    showToast("Configuration updated locally. API is not reachable yet.");
+    showToast(t("toast.configLocal"));
   }
   renderSettings();
   renderGames(); // install_after_download changes the button label
@@ -1381,10 +1413,10 @@ async function updateAll() {
     g.status === "available" && isInstallAllowed(g) &&
     !g.downloading && !g.downloaded);
   if (!targets.length) {
-    showToast("No installable updates to queue.");
+    showToast(t("toast.noUpdates"));
     return;
   }
-  showToast(`Queueing ${targets.length} update${targets.length === 1 ? "" : "s"}…`);
+  showToast(t(targets.length === 1 ? "toast.queueingOne" : "toast.queueingMany", { count: targets.length }));
   for (const g of targets) {
     // Sequential await: the pool returns quickly (202 Accepted) and we want
     // a stable order in the queue, not a thundering-herd of concurrent POSTs.
@@ -1414,7 +1446,7 @@ async function doDownload(game) {
       game.downloaded = true;
       renderGames();
     } else {
-      state.logs.push(`[${timeNow()}] Download queued: ${game.title_id} ${game.compatible_version || ""}`);
+      addLog("log.downloadQueued", { id: game.title_id, version: game.compatible_version || "" });
       renderLogs();
     }
   } catch (error) {
@@ -1422,8 +1454,8 @@ async function doDownload(game) {
     game._localDownloading = false;
     state.downloads = state.downloads.filter((i) => i.title_id !== game.title_id);
     const why = reasonText(error);
-    state.logs.push(`[${timeNow()}] download ${game.title_id} blocked: ${why}`);
-    showToast(`${game.name}: ${why}`);
+    addLog("log.downloadBlocked", { id: game.title_id, why });
+    showToast(t("toast.nameMessage", { name: game.name, message: why }));
     renderGames(); renderLogs();
   }
 }
@@ -1446,13 +1478,13 @@ async function doInstall(game) {
       game.installing = false;
     }
     const why = reasonText(error);
-    state.logs.push(`[${timeNow()}] install ${game.title_id} blocked: ${why}`);
-    showToast(`${game.name}: ${why}`);
+    addLog("log.installBlocked", { id: game.title_id, why });
+    showToast(t("toast.nameMessage", { name: game.name, message: why }));
     renderGames(); renderLogs();
     return false;
   }
-  state.logs.push(`[${timeNow()}] Install started for ${game.title_id} ${game.compatible_version} — running in PS5 background`);
-  showToast(`${game.name}: installing update.`);
+  addLog("log.installStarted", { id: game.title_id, version: game.compatible_version });
+  showToast(t("toast.installing", { name: game.name }));
   startInstallPolling();
   renderGames(); renderLogs();
   return true;
@@ -1464,9 +1496,9 @@ async function cancelDownload(titleId) {
   const game = state.titles.find((g) => g.title_id === titleId);
   try {
     await postJson(API.action(titleId, "cancel"), {});
-    showToast(`${game ? game.name : titleId}: download cancelled / deleted.`);
+    showToast(t("toast.cancelled", { name: game ? game.name : titleId }));
   } catch (error) {
-    showToast(`${game ? game.name : titleId}: ${reasonText(error)}`);
+    showToast(t("toast.nameMessage", { name: game ? game.name : titleId, message: reasonText(error) }));
     return;   // refused (e.g. the console is installing from it): nothing changed
   }
   if (game) {
@@ -1478,7 +1510,7 @@ async function cancelDownload(titleId) {
     game.manual_version = null;   // the server drops the pasted link on cancel
   }
   state.downloads = state.downloads.filter((i) => i.title_id !== titleId);
-  state.logs.push(`[${timeNow()}] Download cancelled / deleted: ${titleId}`);
+  addLog("log.cancelled", { id: titleId });
   renderGames(); renderLogs();
   refreshDownloads();
 }
@@ -1500,9 +1532,9 @@ async function runTitleAction(titleId, action) {
 async function doPause(game) {
   try {
     await postJson(API.action(game.title_id, "pause"), {});
-    showToast(`${game.name}: pausing…`);
+    showToast(t("toast.pausing", { name: game.name }));
   } catch (error) {
-    showToast(`${game.name}: ${reasonText(error)}`);
+    showToast(t("toast.nameMessage", { name: game.name, message: reasonText(error) }));
   }
 }
 
@@ -1514,8 +1546,8 @@ function updateGame(titleId, patch) {
 
   const wantEnabled = game.enabled !== false;
   postJson(API.action(titleId, wantEnabled ? "enable" : "disable"), {})
-    .then(() => { state.logs.push(`[${timeNow()}] Saved: ${titleId} ${wantEnabled ? "enabled" : "disabled"}`); renderLogs(); })
-    .catch(() => showToast(`${titleId}: could not save toggle (API not reachable).`));
+    .then(() => { addLog(wantEnabled ? "log.savedEnabled" : "log.savedDisabled", { id: titleId }); renderLogs(); })
+    .catch(() => showToast(t("toast.toggleFailed", { id: titleId })));
 }
 
 /* ---------------- policy helpers ---------------- */
@@ -1560,41 +1592,16 @@ async function postJson(url, body) {
   return data;
 }
 
-const REASON_TEXT = {
-  patch_title_mismatch: "Patch metadata targets a different title - install blocked.",
-  install_not_allowed_for_source: "Install blocked for this source.",
-  source_unknown: "Source unknown — blocked.",
-  source_fake: "Fake packages are not supported.",
-  source_shadowmount: "Shadowmount titles are not supported.",
-  no_compatible_patch: "No compatible patch available.",
-  download_failed: "Download failed.",
-  download_in_progress: "Another download is already running.",
-  piece_verify_failed: "A downloaded piece failed its SHA-256 check.",
-  install_running: "The console is installing from this package right now. Try again when it is done.",
-  already_installed: "This version is already installed.",
-  too_many_installs: "Too many installs running at once. Try again when one has finished.",
-  download_incomplete: "The download is not complete yet.",
-  download_unverified: "The package on disk hasn't been checked yet. Press Update: PatchDL verifies it and downloads only what's missing.",
-  title_disabled: "This title is disabled.",
-  download_paused: "Download paused.",
-  not_downloading: "Nothing is downloading for this title.",
-  not_an_sc_link: "That is not the SC link. Under Additional Files, copy the link of the SC button.",
-  url_title_mismatch: "That link belongs to a different game.",
-  url_not_allowed: "Only Sony CDN links (https) are accepted.",
-  url_invalid: "The link contains unexpected characters.",
-  no_space: "Not enough free space on the PS5.",
-  manifest_unavailable: "The PS5 could not load the package list from Sony. Copy the SC link again and retry.",
-  download_exists: "A download already exists for this game. Cancel it first.",
-  source_not_supported: "Downloads are not supported for this source.",
-};
+// Server refusal reasons are translated as reason.<code> in i18n.js.
 // The server keeps 2 GB free on /data on top of the package itself.
 function noSpaceText(need, free) {
-  return `Not enough space on the PS5: needs ${formatBytes(need)} plus 2 GB headroom, ${formatBytes(free)} free.`;
+  return t("reason.noSpace", { need: formatBytes(need), free: formatBytes(free) });
 }
 
 function reasonText(error) {
   const r = error && error.body && error.body.reason;
-  return (r && REASON_TEXT[r]) || (error && error.message) || "failed";
+  return (r && r !== "fallback" && r !== "noSpace" && tHas(`reason.${r}`) ? t(`reason.${r}`) : "") ||
+    (error && error.message) || t("reason.fallback");
 }
 
 /* ---------------- QR code (byte mode, ECC level M, versions 1-6) ----------------
@@ -1804,7 +1811,7 @@ function qrSvg(matrix) {
   matrix.forEach((row, y) => row.forEach((dark, x) => {
     if (dark) d += `M${x + q},${y + q}h1v1h-1z`;
   }));
-  return `<svg xmlns="http://www.w3.org/2000/svg" class="qr" viewBox="0 0 ${s} ${s}" shape-rendering="crispEdges" role="img" aria-label="QR code"><rect width="${s}" height="${s}" fill="#fff" stroke="none"/><path d="${d}" fill="#000" stroke="none"/></svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" class="qr" viewBox="0 0 ${s} ${s}" shape-rendering="crispEdges" role="img" aria-label="${escapeHtml(t("qr.aria"))}"><rect width="${s}" height="${s}" fill="#fff" stroke="none"/><path d="${d}" fill="#000" stroke="none"/></svg>`;
 }
 
 /* ---------------- older patch guide (Prospero) ---------------- */
@@ -1860,12 +1867,12 @@ function openGuideFromHash() {
   const m = location.hash.match(/^#get\/([A-Za-z0-9_.-]+)(?:\/([0-9.]+)\/([A-Za-z0-9. %]*))?$/);
   if (!m) return;
   const game = state.titles.find((g) => g.title_id === m[1]);
-  if (!game) { showToast("That game is not installed on this PS5."); clearGuideHash(); return; }
+  if (!game) { showToast(t("toast.notInstalled")); clearGuideHash(); return; }
   if (m[2]) {
     // a version picked under "Other versions" on the console
     const pick = pickFor(game, m[2], decodeURIComponent(m[3] || ""));
     if (!canPickVersion(game, pick.version)) {
-      showToast(`${game.name}: a download is already on its way.`);
+      showToast(t("toast.alreadyOnWay", { name: game.name }));
       clearGuideHash();
       return;
     }
@@ -1874,8 +1881,8 @@ function openGuideFromHash() {
   }
   if (!canGetOlderPatch(game)) {
     showToast(game.manual_version || game.downloading || game.downloaded
-      ? `${game.name}: the older patch is already on its way.`
-      : `${game.name}: there is no older patch to fetch.`);
+      ? t("toast.olderOnWay", { name: game.name })
+      : t("toast.noOlderPatch", { name: game.name }));
     clearGuideHash();
     return;
   }
@@ -1909,56 +1916,61 @@ function openGuide(game, fromLink = false, pick = null) {
   const head = `
       <header class="guide-head">
         <div>
-          <p class="eyebrow">${pick.chosen ? "Other version" : "Old FW patch"}</p>
-          <h2 id="guideTitle">Get ${ver}</h2>
+          <p class="eyebrow">${t(pick.chosen ? "guide.eyebrowOther" : "guide.eyebrowOld")}</p>
+          <h2 id="guideTitle">${t("guide.title", { version: ver })}</h2>
           <p class="guide-game">${escapeHtml(game.name)}</p>
         </div>
-        <button class="icon-button guide-close" type="button" aria-label="Close">×</button>
+        <button class="icon-button guide-close" type="button" aria-label="${escapeHtml(t("common.close"))}">×</button>
       </header>`;
 
   let body;
   if (onConsole) {
     body = matrix
       ? `<div class="guide-handoff">${qrSvg(matrix)}
-           <p>Scan this code with your phone, or open this link on your phone:</p>
+           <p>${t("guide.scanConsole")}</p>
            <code>${escapeHtml(link)}</code>
          </div>`
-      : `<p class="guide-why">Open PatchDL on your phone (this console's IP address, port ${escapeHtml(String(state.status.http_port || 12880))}) and pick the game there.</p>`;
+      : `<p class="guide-why">${t("guide.openOnPhone", { port: escapeHtml(String(state.status.http_port || 12880)) })}</p>`;
     body += `<div class="guide-status" role="status" aria-live="polite"></div>`;
   } else {
     const handoff = matrix
       ? `<div class="guide-qr">${qrSvg(matrix)}<div>
-           <strong>Easier on your phone</strong>
-           <span>Scan this with your phone camera and continue there. This screen follows along.</span>
+           <strong>${t("guide.easier")}</strong>
+           <span>${t("guide.easierText")}</span>
            <code>${escapeHtml(link)}</code>
          </div></div>`
       : "";
     const why = pick.chosen
-      ? `${site} lists version <b>${ver}</b>${size}. PatchDL downloads it from Sony once you hand over its link.`
-      : `Sony only offers ${escapeHtml(game.latest_version || "the newest patch")}, which needs FW ${escapeHtml(game.latest_required_fw || "?")}. Prospero Patches still lists <b>${ver}</b>, which runs on FW ${escapeHtml(pick.fw || "?")}.`;
+      ? t("guide.whyChosen", { site, version: ver, size })
+      : t("guide.whyOld", {
+          latest: escapeHtml(game.latest_version || t("guide.newestPatch")),
+          fw: escapeHtml(game.latest_required_fw || "?"),
+          version: ver,
+          pickFw: escapeHtml(pick.fw || "?"),
+        });
     const copyStep = pick.ps4
-      ? `<strong>Copy the links</strong>
-            <span>Press <b>Copy all links!</b> next to <i>Using download manager?</i> PatchDL needs any one of them.</span>`
-      : `<strong>Copy the SC link</strong>
-            <span>Under <b>Additional Files</b>, press and hold the <b>SC</b> button and choose <i>Copy Link</i>. PatchDL takes the full piece list from it.</span>`;
+      ? `<strong>${t("guide.copyLinks")}</strong>
+            <span>${t("guide.copyLinksText")}</span>`
+      : `<strong>${t("guide.copySc")}</strong>
+            <span>${t("guide.copyScText")}</span>`;
     body = `
       <p class="guide-why">${why}</p>
       ${handoff}
       <ol class="guide-steps">
         <li>
-          <div class="guide-step-text"><strong>Open ${site}</strong>
-            <span>Tap version <b>${ver}</b>${size}. If a human check shows up, confirm it.</span></div>
-          <a class="row-button is-update guide-open" href="${escapeHtml(pick.page)}" target="_blank" rel="noopener">Open ${pick.ps4 ? "Orbis" : "Prospero"}</a>
+          <div class="guide-step-text"><strong>${t("guide.openSite", { site })}</strong>
+            <span>${t("guide.tapVersion", { version: ver, size })}</span></div>
+          <a class="row-button is-update guide-open" href="${escapeHtml(pick.page)}" target="_blank" rel="noopener">${t("guide.openSite", { site: pick.ps4 ? "Orbis" : "Prospero" })}</a>
         </li>
         <li>
           <div class="guide-step-text">${copyStep}</div>
         </li>
         <li>
-          <div class="guide-step-text"><strong>Paste it here</strong>
-            <span>The download starts on your PS5 as soon as the link is in.</span></div>
+          <div class="guide-step-text"><strong>${t("guide.paste")}</strong>
+            <span>${t("guide.pasteText")}</span></div>
           <div class="guide-paste">
-            <input class="guide-input" type="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="${pick.ps4 ? "http://…_0.pkg" : "https://…_sc.pkg"}" aria-label="Link">
-            <button class="row-button guide-start" type="button">Start</button>
+            <input class="guide-input" type="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="${pick.ps4 ? "http://…_0.pkg" : "https://…_sc.pkg"}" aria-label="${escapeHtml(t("guide.linkAria"))}">
+            <button class="row-button guide-start" type="button">${t("guide.start")}</button>
           </div>
           <div class="guide-status" role="status" aria-live="polite"></div>
         </li>
@@ -1988,7 +2000,7 @@ function openGuide(game, fromLink = false, pick = null) {
   guide.onKey = (e) => { if (e.key === "Escape") closeGuide(); };
   document.addEventListener("keydown", guide.onKey);
 
-  guideStatus("idle", matrix ? "Waiting for the link from your phone…" : "");
+  guideStatus("idle", matrix ? t("guide.waitingPhone") : "");
   guide.timer = setInterval(guidePoll, 2000);
   (fromLink ? wrap.querySelector(".guide-open") : wrap.querySelector(".guide-close")).focus();
 }
@@ -2030,12 +2042,12 @@ async function guideSubmit(url, force) {
   const game = guide.game;
   if (!game || guide.busy) return;
   const pick = guide.pick;
-  if (!url) { guideStatus("error", pick.ps4 ? "Paste a link from Orbis first." : "Paste the SC link from Prospero first."); return; }
+  if (!url) { guideStatus("error", t(pick.ps4 ? "guide.pasteOrbis" : "guide.pasteSc")); return; }
   guide.busy = true;
   guide.lastUrl = url;
   const start = guide.el.querySelector(".guide-start");
   start.disabled = true;
-  guideStatus("busy", "Checking the link on your PS5…");
+  guideStatus("busy", t("guide.checkingLink"));
   try {
     await postJson("/api/download_url", {
       title_id: game.title_id, url, version: pick.version, size: pick.size, force,
@@ -2049,24 +2061,29 @@ async function guideSubmit(url, force) {
       guideStatus("error", escapeHtml(noSpaceText(b.need_bytes, b.free_bytes)));
     } else if (b.reason === "size_mismatch") {
       guideStatus("warn",
-        `This link is ${formatBytes(b.found_bytes)} in ${Number(b.pieces) || "?"} pieces, but ${escapeHtml(pick.version)} should be about ${escapeHtml(b.expected || "?")}. It is probably a different version.`,
-        { label: "Download anyway", run: () => guideSubmit(url, true) });
+        t("guide.sizeMismatch", {
+          found: formatBytes(b.found_bytes),
+          pieces: Number(b.pieces) || "?",
+          version: escapeHtml(pick.version),
+          expected: escapeHtml(b.expected || "?"),
+        }),
+        { label: t("guide.downloadAnyway"), run: () => guideSubmit(url, true) });
     } else {
       guideStatus("error", escapeHtml(reasonText(error)) + (b.detail ? ` (${escapeHtml(b.detail)})` : ""));
     }
-    state.logs.push(`[${timeNow()}] ${pick.site} link for ${game.title_id} refused: ${reasonText(error)}`);
+    addLog("log.linkRefused", { site: pick.site, id: game.title_id, why: reasonText(error) });
     renderLogs();
     return;
   }
   guide.busy = false;
   manualDownloadStarted(game, pick.version);
   if (!guide.fromLink) {
-    showToast(`${game.name}: download of ${pick.version} started.`);
+    showToast(t("toast.downloadStarted", { name: game.name, version: pick.version }));
     closeGuide();
     return;
   }
   guide.started = true;
-  guideStatus("ok", "Download started on your PS5.");
+  guideStatus("ok", t("guide.started"));
 }
 
 // Card state for a download that the server has accepted (from this page or
@@ -2080,7 +2097,7 @@ function manualDownloadStarted(game, version) {
   state.downloads = state.downloads.filter((i) => i.title_id !== game.title_id);
   state.downloads.push({ title_id: game.title_id, name: game.name, version: game.manual_version,
                          state: "queued", progress: 0, bytes: 0, total_bytes: 0 });
-  state.logs.push(`[${timeNow()}] Download queued (${isPs4(game) ? "Orbis" : "Prospero"}): ${game.title_id} ${game.manual_version}`);
+  addLog("log.downloadQueuedFrom", { site: isPs4(game) ? "Orbis" : "Prospero", id: game.title_id, version: game.manual_version });
   renderGames(); renderLogs();
   startDownloadPolling();
 }
@@ -2105,7 +2122,7 @@ async function guidePoll() {
     if (j.state !== "queued" && j.state !== "active") return;
     manualDownloadStarted(game, guide.pick.version);
     if (!guide.fromLink) {
-      showToast(`${game.name}: link received, download of ${guide.pick.version} started.`);
+      showToast(t("toast.linkReceived", { name: game.name, version: guide.pick.version }));
       closeGuide();
       return;
     }
@@ -2114,16 +2131,15 @@ async function guidePoll() {
   const total = Number(j.total_bytes) || 0;
   const pct = total ? Math.min(100, Math.round((Number(j.bytes) || 0) * 100 / total)) : 0;
   const note = {
-    queued: "Queued on your PS5…",
-    active: "Downloading on your PS5. You can close this page.",
-    paused: "Paused on your PS5.",
-    done: state.config.install_after_download
-      ? "Downloaded. Your PS5 installs it now."
-      : "Downloaded. Press Install on the game in PatchDL.",
-    error: "The download stopped. Resume it from the game in PatchDL.",
-  }[j.state] || "";
+    queued: () => t("guide.note.queued"),
+    active: () => t("guide.note.active"),
+    paused: () => t("guide.note.paused"),
+    done: () => t(state.config.install_after_download ? "guide.note.doneInstall" : "guide.note.doneManual"),
+    error: () => t("guide.note.error"),
+  }[j.state];
+  const noteText = note ? note() : "";
   guideStatus(j.state === "error" ? "error" : "ok",
-    `${note}<span class="guide-progress"><span class="progress"><i style="width:${pct}%"></i></span>` +
+    `${noteText}<span class="guide-progress"><span class="progress"><i style="width:${pct}%"></i></span>` +
     `<span>${total ? `${formatBytes(j.bytes)} / ${formatBytes(total)} · ` : ""}${pct}%</span></span>`);
 }
 
@@ -2154,11 +2170,11 @@ function formatMb(mb) {
 function formatEta(seconds) {
   const s = Math.round(Number(seconds) || 0);
   if (!Number.isFinite(s) || s <= 0) return "--";
-  if (s < 60) return `${s}s`;
+  if (s < 60) return t("fmt.etaSec", { s });
   const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ${s % 60}s`;
+  if (m < 60) return t("fmt.etaMin", { m, s: s % 60 });
   const h = Math.floor(m / 60);
-  return `${h}h ${m % 60}m`;
+  return t("fmt.etaHour", { h, m: m % 60 });
 }
 
 function escapeHtml(value) {

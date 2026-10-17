@@ -34,31 +34,31 @@
     </svg>
 
     <div class="app-shell">
-      <aside class="rail" aria-label="Navigation">
+      <aside class="rail" aria-label="Navigation" data-i18n-aria-label="nav.label">
         <div class="brand">
           <div class="brand-mark">PD</div>
           <div>
             <strong>PatchDL</strong>
-            <span>by Knutwurst · <span id="brandVersion">--</span></span>
+            <span><span class="brand-by" data-i18n="brand.by">by Knutwurst</span> · <span id="brandVersion">--</span></span>
           </div>
         </div>
 
-        <nav class="nav-list" aria-label="Sections">
-          <button class="nav-link is-active" data-view="games" aria-label="Games" aria-current="page">
-            <svg><use href="#icon-grid"></use></svg><span>Games</span>
+        <nav class="nav-list" aria-label="Sections" data-i18n-aria-label="nav.sections">
+          <button class="nav-link is-active" data-view="games" aria-label="Games" data-i18n-aria-label="nav.games" aria-current="page">
+            <svg><use href="#icon-grid"></use></svg><span data-i18n="nav.games">Games</span>
           </button>
-          <button class="nav-link" data-view="settings" aria-label="Settings">
-            <svg><use href="#icon-settings"></use></svg><span>Settings</span>
+          <button class="nav-link" data-view="settings" aria-label="Settings" data-i18n-aria-label="nav.settings">
+            <svg><use href="#icon-settings"></use></svg><span data-i18n="nav.settings">Settings</span>
           </button>
-          <button class="nav-link" data-view="logs" aria-label="Logs">
-            <svg><use href="#icon-log"></use></svg><span>Logs</span>
+          <button class="nav-link" data-view="logs" aria-label="Logs" data-i18n-aria-label="nav.logs">
+            <svg><use href="#icon-log"></use></svg><span data-i18n="nav.logs">Logs</span>
           </button>
         </nav>
 
         <div class="rail-foot">
           <span id="railFw">FW --</span>
-          <span id="railSpace">-- free</span>
-          <button type="button" class="link-button rail-donate" data-donate>Buy me a coffee</button>
+          <span id="railSpace" data-i18n="rail.freeUnknown">-- free</span>
+          <button type="button" class="link-button rail-donate" data-donate data-i18n="donate.button">Buy me a coffee</button>
         </div>
       </aside>
 
@@ -67,15 +67,15 @@
         <section class="view is-active" data-view="games">
           <header class="topbar">
             <div>
-              <p class="eyebrow">PS5 &amp; PS4 game updates</p>
-              <h1>Games</h1>
+              <p class="eyebrow" data-i18n="games.eyebrow">PS5 &amp; PS4 game updates</p>
+              <h1 data-i18n="games.title">Games</h1>
             </div>
             <div class="topbar-actions">
-              <button class="primary-button" id="updateAllBtn" title="Download (and optionally install) every game that has an available, allowed update">
+              <button class="primary-button" id="updateAllBtn" title="Download (and optionally install) every game that has an available, allowed update" data-i18n-title="games.updateAllTitle">
                 <svg><use href="#icon-download"></use></svg>
-                Update all
+                <span data-i18n="games.updateAll">Update all</span>
               </button>
-              <button class="icon-button" id="refreshBtn" title="Refresh status and games" aria-label="Refresh">
+              <button class="icon-button" id="refreshBtn" title="Refresh status and games" data-i18n-title="games.refreshTitle" aria-label="Refresh" data-i18n-aria-label="games.refresh">
                 <svg><use href="#icon-refresh"></use></svg>
               </button>
             </div>
@@ -86,7 +86,7 @@
               <span class="global-dl-pulse" aria-hidden="true"></span>
               <div class="global-dl-text">
                 <div class="global-dl-line1">
-                  <span class="global-dl-eyebrow" id="globalDlState">Downloading</span>
+                  <span class="global-dl-eyebrow" id="globalDlState" data-i18n="dl.downloading">Downloading</span>
                   <strong class="global-dl-name" id="globalDlName">—</strong>
                   <span class="global-dl-position" id="globalDlPosition" hidden></span>
                 </div>
@@ -104,39 +104,39 @@
             </div>
           </aside>
 
-          <section class="status-strip" aria-label="System status">
+          <section class="status-strip" aria-label="System status" data-i18n-aria-label="status.label">
             <article class="metric">
-              <span>Firmware</span>
+              <span data-i18n="metric.firmware">Firmware</span>
               <strong id="firmwareValue">--</strong>
-              <em id="firmwareBuild">System version</em>
+              <em id="firmwareBuild" data-i18n="metric.firmwareBuild">System version</em>
             </article>
             <article class="metric">
-              <span>DNS Guard</span>
+              <span data-i18n="metric.dns">DNS Guard</span>
               <strong id="dnsValue">--</strong>
-              <em>System DNS left untouched</em>
+              <em data-i18n="metric.dnsNote">System DNS left untouched</em>
             </article>
             <article class="metric">
-              <span>CDN Access</span>
+              <span data-i18n="metric.cdn">CDN Access</span>
               <strong id="resolverValue">--</strong>
-              <em>PatchDL resolver only</em>
+              <em data-i18n="metric.cdnNote">PatchDL resolver only</em>
             </article>
             <article class="metric">
-              <span>Storage</span>
+              <span data-i18n="metric.storage">Storage</span>
               <strong id="spaceValue">--</strong>
-              <em id="downloadDirValue">Download target</em>
+              <em id="downloadDirValue" data-i18n="metric.downloadTarget">Download target</em>
             </article>
           </section>
 
           <div class="toolbar">
             <div class="search-box">
               <svg><use href="#icon-search"></use></svg>
-              <input id="searchInput" type="search" placeholder="Search title, Title ID, or Content ID" />
+              <input id="searchInput" type="search" placeholder="Search title, Title ID, or Content ID" data-i18n-placeholder="search.placeholder" />
             </div>
-            <div class="segmented" role="group" aria-label="Filter">
-              <button class="is-selected" data-filter="updates" aria-pressed="true">Updates <span class="chip-count"></span></button>
-              <button data-filter="uptodate" aria-pressed="false">Up to date <span class="chip-count"></span></button>
-              <button data-filter="blocked" aria-pressed="false">Not supported <span class="chip-count"></span></button>
-              <button data-filter="all" aria-pressed="false">All <span class="chip-count"></span></button>
+            <div class="segmented" role="group" aria-label="Filter" data-i18n-aria-label="filter.label">
+              <button class="is-selected" data-filter="updates" aria-pressed="true"><span data-i18n="filter.updates">Updates</span> <span class="chip-count"></span></button>
+              <button data-filter="uptodate" aria-pressed="false"><span data-i18n="filter.uptodate">Up to date</span> <span class="chip-count"></span></button>
+              <button data-filter="blocked" aria-pressed="false"><span data-i18n="filter.blocked">Not supported</span> <span class="chip-count"></span></button>
+              <button data-filter="all" aria-pressed="false"><span data-i18n="filter.all">All</span> <span class="chip-count"></span></button>
             </div>
           </div>
 
@@ -147,13 +147,13 @@
         <section class="view" data-view="settings">
           <header class="topbar">
             <div>
-              <p class="eyebrow">Policy</p>
-              <h1>Settings</h1>
+              <p class="eyebrow" data-i18n="settings.eyebrow">Policy</p>
+              <h1 data-i18n="settings.title">Settings</h1>
             </div>
             <div class="topbar-actions">
               <button class="primary-button" id="saveBtn">
                 <svg><use href="#icon-save"></use></svg>
-                Save
+                <span data-i18n="settings.save">Save</span>
               </button>
             </div>
           </header>
@@ -161,89 +161,94 @@
           <div class="panel">
             <div class="settings-grid">
               <label class="field">
-                <span>Default Policy</span>
+                <span data-i18n="settings.defaultPolicy">Default Policy</span>
                 <select id="defaultPolicy">
-                  <option value="deny">Deny by default</option>
-                  <option value="allow">Allow by default</option>
+                  <option value="deny" data-i18n="settings.policyDeny">Deny by default</option>
+                  <option value="allow" data-i18n="settings.policyAllow">Allow by default</option>
                 </select>
               </label>
               <label class="field">
-                <span>Download Folder</span>
+                <span data-i18n="settings.downloadFolder">Download Folder</span>
                 <input id="downloadDir" type="text" spellcheck="false" readonly
-                       title="Patches always download to the console's internal storage" />
+                       title="Patches always download to the console's internal storage"
+                       data-i18n-title="settings.downloadFolderTitle" />
+              </label>
+              <label class="field">
+                <span data-i18n="settings.language">Language</span>
+                <select id="language"></select>
               </label>
 
               <label class="switch-row">
                 <span>
-                  <strong>Install after download</strong>
-                  <em>Global default, overridable per game</em>
+                  <strong data-i18n="settings.installAfter">Install after download</strong>
+                  <em data-i18n="settings.installAfterHint">Global default, overridable per game</em>
                 </span>
                 <span class="toggle">
-                  <input id="installAfterDownload" type="checkbox" aria-label="Install after download" />
+                  <input id="installAfterDownload" type="checkbox" aria-label="Install after download" data-i18n-aria-label="settings.installAfter" />
                   <span class="track"></span>
                 </span>
               </label>
               <label class="switch-row">
                 <span>
-                  <strong>Delete PKG after install</strong>
-                  <em>Only after a successful install</em>
+                  <strong data-i18n="settings.deleteAfter">Delete PKG after install</strong>
+                  <em data-i18n="settings.deleteAfterHint">Only after a successful install</em>
                 </span>
                 <span class="toggle">
-                  <input id="deleteAfterInstall" type="checkbox" aria-label="Delete package after install" />
+                  <input id="deleteAfterInstall" type="checkbox" aria-label="Delete package after install" data-i18n-aria-label="settings.deleteAfterAria" />
                   <span class="track"></span>
                 </span>
               </label>
               <label class="switch-row">
                 <span>
-                  <strong>Verify downloaded pieces (SHA-256)</strong>
-                  <em>Checks each manifest piece; off by default, verify on-device first</em>
+                  <strong data-i18n="settings.verify">Verify downloaded pieces (SHA-256)</strong>
+                  <em data-i18n="settings.verifyHint">Checks each manifest piece; off by default, verify on-device first</em>
                 </span>
                 <span class="toggle">
-                  <input id="verifyDownloads" type="checkbox" aria-label="Verify downloaded pieces" />
+                  <input id="verifyDownloads" type="checkbox" aria-label="Verify downloaded pieces" data-i18n-aria-label="settings.verifyAria" />
                   <span class="track"></span>
                 </span>
               </label>
               <label class="switch-row">
                 <span>
-                  <strong>Home-screen shortcut</strong>
-                  <em id="shortcutHint">Add a PS5 home-screen icon that opens this UI in the browser</em>
+                  <strong data-i18n="settings.shortcut">Home-screen shortcut</strong>
+                  <em id="shortcutHint" data-i18n="settings.shortcutHint">Add a PS5 home-screen icon that opens this UI in the browser</em>
                 </span>
                 <span class="toggle">
-                  <input id="homeShortcut" type="checkbox" aria-label="Install home-screen shortcut" />
+                  <input id="homeShortcut" type="checkbox" aria-label="Install home-screen shortcut" data-i18n-aria-label="settings.shortcutAria" />
                   <span class="track"></span>
                 </span>
               </label>
               <div class="switch-row">
                 <span>
-                  <strong>Parallel download connections</strong>
-                  <em>1–16 · applies live, no payload restart</em>
+                  <strong data-i18n="settings.connections">Parallel download connections</strong>
+                  <em data-i18n="settings.connectionsHint">1–16 · applies live, no payload restart</em>
                 </span>
-                <div class="stepper" role="group" aria-label="Parallel download connections">
-                  <button type="button" class="stepper-btn" id="connMinus" aria-label="Fewer connections">−</button>
+                <div class="stepper" role="group" aria-label="Parallel download connections" data-i18n-aria-label="settings.connections">
+                  <button type="button" class="stepper-btn" id="connMinus" aria-label="Fewer connections" data-i18n-aria-label="settings.connFewer">−</button>
                   <output class="stepper-value" id="connValue" aria-live="polite">4</output>
-                  <button type="button" class="stepper-btn" id="connPlus" aria-label="More connections">+</button>
+                  <button type="button" class="stepper-btn" id="connPlus" aria-label="More connections" data-i18n-aria-label="settings.connMore">+</button>
                 </div>
               </div>
             </div>
 
             <div class="allowlist">
-              <span>Internal CDN Allowlist</span>
+              <span data-i18n="settings.allowlist">Internal CDN Allowlist</span>
               <div id="allowlistHosts"></div>
             </div>
 
             <div class="source-policy">
-              <span>Install Protection</span>
+              <span data-i18n="settings.installProtection">Install Protection</span>
               <div id="sourcePolicyList"></div>
             </div>
 
             <div class="storage-list">
-              <span>Downloads on console <em id="storageTotal"></em></span>
+              <span><span data-i18n="settings.storage">Downloads on console</span> <em id="storageTotal"></em></span>
               <div id="storageList"></div>
             </div>
 
             <div class="donate-row">
-              <span>Like PatchDL? You can buy me a coffee.</span>
-              <button type="button" class="row-button is-ghost" data-donate>Buy me a coffee</button>
+              <span data-i18n="settings.donateText">Like PatchDL? You can buy me a coffee.</span>
+              <button type="button" class="row-button is-ghost" data-donate data-i18n="donate.button">Buy me a coffee</button>
             </div>
           </div>
         </section>
@@ -252,11 +257,11 @@
         <section class="view" data-view="logs">
           <header class="topbar">
             <div>
-              <p class="eyebrow">Runtime</p>
-              <h1>Logs</h1>
+              <p class="eyebrow" data-i18n="logs.eyebrow">Runtime</p>
+              <h1 data-i18n="logs.title">Logs</h1>
             </div>
             <div class="topbar-actions">
-              <button class="icon-button" id="clearLogBtn" title="Clear log" aria-label="Clear log">
+              <button class="icon-button" id="clearLogBtn" title="Clear log" data-i18n-title="logs.clear" aria-label="Clear log" data-i18n-aria-label="logs.clear">
                 <svg><use href="#icon-log"></use></svg>
               </button>
             </div>
@@ -267,6 +272,7 @@
     </div>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="i18n.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

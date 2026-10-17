@@ -83,6 +83,7 @@ svg {
 
 .brand strong { display: block; font-size: 16px; }
 .brand span { display: block; margin-top: 2px; color: var(--muted); font-size: 12px; }
+.brand .brand-by { display: inline; margin-top: 0; }
 
 .nav-list { display: grid; gap: 6px; }
 
