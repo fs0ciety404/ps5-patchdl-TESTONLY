@@ -185,12 +185,17 @@ patchdl_patchsite_versions(const char *title_id, patchdl_patch_version_t *out,
 int
 patchdl_prospero_query(const char *title_id, uint32_t fw_bin,
                        patchdl_prospero_result_t *out) {
-    patchdl_patch_version_t list[64];
-    int                     n = 0, best = -1;
+    patchdl_patch_version_t *list;
+    int                      n = 0, best = -1;
 
     if (!title_id || !out) return -1;
     memset(out, 0, sizeof(*out));
-    if (patchdl_patchsite_versions(title_id, list, 64, &n)) return -1;
+    /* The whole history: the newest versions may all need newer firmware. */
+    if (!(list = calloc(PATCHSITE_MAX_VERSIONS, sizeof *list))) return -1;
+    if (patchdl_patchsite_versions(title_id, list, PATCHSITE_MAX_VERSIONS, &n)) {
+        free(list);
+        return -1;
+    }
 
     /* the newest version whose firmware requirement is met */
     for (int i = 0; i < n; i++)
@@ -203,5 +208,6 @@ patchdl_prospero_query(const char *title_id, uint32_t fw_bin,
         snprintf(out->size, sizeof out->size, "%s", list[best].size);
         out->found = 1;
     }
+    free(list);
     return 0;
 }

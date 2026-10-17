@@ -34,6 +34,9 @@ typedef struct {
     uint32_t fw_bin;           /* PS5 firmware it needs, 0 for PS4 */
 } patchdl_patch_version_t;
 
+/* More versions than any game has had (the response is capped at 512 KB). */
+#define PATCHSITE_MAX_VERSIONS 512
+
 /* Base URL of the site that lists this title's patches. */
 const char *patchdl_patchsite_base(const char *title_id);
 

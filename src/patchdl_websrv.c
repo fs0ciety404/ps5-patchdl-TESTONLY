@@ -2600,9 +2600,9 @@ queue_versions(struct MHD_Connection *conn, const char *tid) {
         }
     pthread_mutex_unlock(&g_mutex);
 
-    if (!(list = calloc(128, sizeof *list)))
+    if (!(list = calloc(PATCHSITE_MAX_VERSIONS, sizeof *list)))
         return queue_text(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, "oom");
-    if (patchdl_patchsite_versions(tid9, list, 128, &n)) {
+    if (patchdl_patchsite_versions(tid9, list, PATCHSITE_MAX_VERSIONS, &n)) {
         free(list);
         return queue_json(conn, MHD_HTTP_BAD_GATEWAY,
                           "{\"ok\":false,\"reason\":\"versions_unavailable\"}");
