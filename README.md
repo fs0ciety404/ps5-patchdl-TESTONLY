@@ -1,7 +1,7 @@
 <h1 align="center">PatchDL</h1>
 
 <p align="center">
-  <img src="docs/images/hero.jpg" alt="PatchDL in a desktop browser and on a phone, fetching a patch that runs on an older firmware" width="900">
+  <img src="docs/images/hero.jpg" alt="PatchDL in a desktop browser, and the Other versions list on a phone" width="900">
 </p>
 
 <p align="center">
@@ -39,12 +39,14 @@
 - **Your whole library at a glance.** Every installed game shows up with its icon, its version and the newest update Sony offers for it, sorted A to Z. Install or remove a game and the list follows within seconds, no restart needed.
 - **Update all.** One click queues every game that has an update. PatchDL works through the queue and installs each update as soon as it lands.
 - **Fast downloads.** Up to 16 parallel connections per update. Change the number in Settings while a download runs.
-- **Survives reboots.** Pause, resume, or lose power: PatchDL saves progress after every finished piece and continues where it stopped.
+- **Gets through.** PatchDL finds Sony's servers even when DNS is blocked, retries a stalled connection on another server, and continues every piece where it stopped, also after a pause, a power cut or a restart.
+- **Pick any version.** **Other versions** lists every patch a game ever had, with size and the firmware it needs. Pick one that runs on your console and PatchDL fetches exactly that one.
 - **Made for your firmware.** You only see updates your console can run. When Sony's newest patch needs a newer firmware, PatchDL finds the newest one that still runs on yours and helps you get it: scan a QR code with your phone, copy one link, and the PS5 does the rest.
 - **Knows where each game came from.** PatchDL checks every game's package and recognizes disc and PlayStation Store installs. It only ever patches games Sony signed.
 - **Checked against Sony's checksums.** Turn on verification and PatchDL compares every piece with the SHA-256 Sony publishes for it.
 - **Reuses what's already there.** If the update package is already on the console, PatchDL checks it against Sony's checksums and downloads only the pieces that don't match.
 - **Keeps your storage tidy.** After an install, PatchDL confirms the game runs the new version and then deletes the package. Prefer to keep packages? Turn that off, and Settings lists every package on the console with its size and version, ready to delete.
+- **In your language.** English, German, French, Spanish, Italian, Brazilian Portuguese, Japanese, Simplified Chinese, Korean and Russian. PatchDL follows your browser, or pick one in Settings.
 - **A tile on your home screen.** One toggle adds PatchDL to the PS5 home screen. Tap it and the UI opens in the console's browser.
 - **Live progress.** A banner at the top shows the current game, speed, time left and where you are in the queue. During an install, the game's card shows how much of the update the console has read.
 
@@ -56,7 +58,7 @@
     <td align="center" width="50%"><img src="docs/images/library.jpg" width="420" alt="Full library with game icons, sorted by name"><br><sub><b>Library</b> &nbsp;·&nbsp; icons, versions and firmware needs, A to Z</sub></td>
   </tr>
   <tr>
-    <td align="center" width="50%"><img src="docs/images/oldfw.jpg" width="420" alt="QR code on the TV and the step-by-step guide on a phone"><br><sub><b>Older firmware</b> &nbsp;·&nbsp; scan on the TV, paste one link on your phone</sub></td>
+    <td align="center" width="50%"><img src="docs/images/versions.jpg" width="420" alt="Other versions list in the browser and the step-by-step guide on a phone"><br><sub><b>Other versions</b> &nbsp;·&nbsp; pick a version, paste one link on your phone</sub></td>
     <td align="center" width="50%"><img src="docs/images/settings.jpg" width="420" alt="Settings view"><br><sub><b>Settings</b> &nbsp;·&nbsp; changes apply right away, no restart</sub></td>
   </tr>
   <tr>
