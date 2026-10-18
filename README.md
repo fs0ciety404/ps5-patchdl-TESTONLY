@@ -5,9 +5,7 @@
 </p>
 
 <p align="center">
-  <b>Official updates for your PS5 and PS4 games, from any browser.</b><br>
-  PatchDL finds the newest update for every PS5 and PS4 game on your console, downloads it at full speed and installs it.<br>
-  Run it from your phone, your laptop or the PS5 itself.
+  Downloads and installs official updates for PS5 and PS4 games, controlled from any browser.
 </p>
 
 <p align="center">
@@ -15,7 +13,6 @@
   <img src="https://img.shields.io/github/downloads/knutwurst/ps5-patchdl/total?style=for-the-badge&color=22c55e" alt="Downloads">
   <img src="https://img.shields.io/badge/games-PS5%20%7C%20PS4-22c55e?style=for-the-badge" alt="PS5 and PS4 games">
   <img src="https://img.shields.io/badge/FW-1.00%E2%80%9313.60-22c55e?style=for-the-badge" alt="Firmware 1.00 to 13.60">
-  <img src="https://img.shields.io/badge/UI-any%20browser-22c55e?style=for-the-badge" alt="Web UI in any browser">
   <img src="https://img.shields.io/github/license/knutwurst/ps5-patchdl?style=for-the-badge&color=3a3a3a" alt="License">
 </p>
 
@@ -33,113 +30,91 @@
 
 ---
 
-## Highlights
+## What it does
 
-- **PS5 and PS4 games.** PatchDL updates both, straight from Sony's servers. PS4 updates land where the console keeps them, next to the game.
-- **Your whole library at a glance.** Every installed game shows up with its icon, its version and the newest update Sony offers for it, sorted A to Z. Install or remove a game and the list follows within seconds, no restart needed.
-- **Update all.** One click queues every game that has an update. PatchDL works through the queue and installs each update as soon as it lands.
-- **Fast downloads.** Up to 16 parallel connections per update. Change the number in Settings while a download runs.
-- **Gets through.** PatchDL finds Sony's servers even when DNS is blocked, retries a stalled connection on another server, and continues every piece where it stopped, also after a pause, a power cut or a restart.
-- **Pick any version.** **Other versions** lists every patch a game ever had, with size and the firmware it needs. Pick one that runs on your console and PatchDL fetches exactly that one.
-- **Made for your firmware.** You only see updates your console can run. When Sony's newest patch needs a newer firmware, PatchDL finds the newest one that still runs on yours and helps you get it: scan a QR code with your phone, copy one link, and the PS5 does the rest.
-- **Knows where each game came from.** PatchDL checks every game's package and recognizes disc and PlayStation Store installs. It only ever patches games Sony signed.
-- **Checked against Sony's checksums.** Turn on verification and PatchDL compares every piece with the SHA-256 Sony publishes for it.
-- **Reuses what's already there.** If the update package is already on the console, PatchDL checks it against Sony's checksums and downloads only the pieces that don't match.
-- **Keeps your storage tidy.** After an install, PatchDL confirms the game runs the new version and then deletes the package. Prefer to keep packages? Turn that off, and Settings lists every package on the console with its size and version, ready to delete.
-- **In your language.** English, German, French, Spanish, Italian, Brazilian Portuguese, Japanese, Simplified Chinese, Korean and Russian. PatchDL follows your browser, or pick one in Settings.
-- **A tile on your home screen.** One toggle adds PatchDL to the PS5 home screen. Tap it and the UI opens in the console's browser.
-- **Live progress.** A banner at the top shows the current game, speed, time left and where you are in the queue. During an install, the game's card shows how much of the update the console has read.
+PatchDL runs as a payload on the PS5 and serves a small web page. Open that page on your phone, your laptop or in the console's browser and you get a list of your installed games with their version and the latest update Sony has for them. Click Update, and PatchDL downloads the patch from Sony's servers and hands it to the console's own installer.
+
+A few things it does on top of that:
+
+- Update all queues every game that has an update and works through them one by one.
+- Downloads use several connections at once (4 by default, up to 16).
+- If the newest patch needs a firmware you don't have, PatchDL looks for the latest one that still runs on your console. Under Other versions you can pick any version of a patch yourself.
+- A download that gets interrupted continues where it stopped, also after a pause or a restart of PatchDL.
+- After a successful install the package is deleted. You can switch that off.
+- Optionally every piece is checked against Sony's checksums.
+- There's a switch for a PatchDL tile on the home screen.
+- The interface is available in ten languages.
+
+PatchDL only updates games installed from disc or the PlayStation Store. It doesn't download games, and it doesn't touch system software.
 
 ## Screenshots
 
 <table>
   <tr>
-    <td align="center" width="50%"><img src="docs/images/games.jpg" width="420" alt="Games view with a running download"><br><sub><b>Games</b> &nbsp;·&nbsp; every update waiting for you, one click away</sub></td>
-    <td align="center" width="50%"><img src="docs/images/library.jpg" width="420" alt="Full library with game icons, sorted by name"><br><sub><b>Library</b> &nbsp;·&nbsp; icons, versions and firmware needs, A to Z</sub></td>
+    <td align="center" width="50%"><img src="docs/images/games.jpg" width="420" alt="Games with updates and a running download"><br><sub>Games with updates</sub></td>
+    <td align="center" width="50%"><img src="docs/images/library.jpg" width="420" alt="All installed games, sorted by name"><br><sub>All installed games</sub></td>
   </tr>
   <tr>
-    <td align="center" width="50%"><img src="docs/images/versions.jpg" width="420" alt="Other versions list in the browser and the step-by-step guide on a phone"><br><sub><b>Other versions</b> &nbsp;·&nbsp; pick a version, paste one link on your phone</sub></td>
-    <td align="center" width="50%"><img src="docs/images/settings.jpg" width="420" alt="Settings view"><br><sub><b>Settings</b> &nbsp;·&nbsp; changes apply right away, no restart</sub></td>
+    <td align="center" width="50%"><img src="docs/images/versions.jpg" width="420" alt="Other versions list in the browser and the guide on a phone"><br><sub>Picking another version</sub></td>
+    <td align="center" width="50%"><img src="docs/images/settings.jpg" width="420" alt="Settings"><br><sub>Settings</sub></td>
   </tr>
   <tr>
-    <td align="center" colspan="2"><img src="docs/images/tile-homescreen.jpg" width="420" alt="PatchDL tile on the PS5 home screen"><br><sub><b>Home screen</b> &nbsp;·&nbsp; the PatchDL tile on a real PS5</sub></td>
+    <td align="center" width="50%"><img src="docs/images/phones.jpg" width="420" alt="PatchDL on a phone: game list and settings"><br><sub>On a phone</sub></td>
+    <td align="center" width="50%"><img src="docs/images/tile-homescreen.jpg" width="420" alt="PatchDL tile on the PS5 home screen"><br><sub>Home screen tile</sub></td>
   </tr>
 </table>
 
-## Fits any screen
-
-Start an update from the couch with your phone, check on it from your laptop, or open it on the TV. The UI adapts to whatever screen it's on.
-
-<p align="center">
-  <img src="docs/images/phones.jpg" alt="PatchDL on a phone: game list and Settings" width="560">
-</p>
-
-## Get started
+## Installation
 
 1. Download `patchdl_<version>.elf` from the [latest release](https://github.com/knutwurst/ps5-patchdl/releases/latest).
 2. Send it to your PS5 with the ELF loader you already use.
-3. A notification on the TV shows the address, for example `http://192.168.0.42:12880/`. Open it in any browser on your network.
-4. Optional: switch on **Home-screen shortcut** in Settings to get the PatchDL tile.
+3. The console shows a notification with the address, e.g. `http://192.168.0.42:12880/`. Open it in a browser on the same network.
 
-**You need** a PS5 that can load ELF payloads. PatchDL runs on firmware 1.00 to 13.60 (tested on 11.60 and 13.60).
+You need a PS5 that can load ELF payloads. PatchDL should run on firmware 1.00 to 13.60; I've tested it on 11.60 and 13.60.
 
-## Good to know
-
-**Does PatchDL download games?**
-No. It fetches updates for games that are already installed on your console. Nothing else.
-
-**Which games does PatchDL update?**
-PS5 and PS4 games you installed from disc or from the PlayStation Store. PatchDL reads each game's package before it offers anything, and it leaves every other title alone.
+## FAQ
 
 **Where do the updates come from?**
-From Sony's official update servers, the same files your console downloads on its own. PatchDL downloads only from a short list of PlayStation CDN hosts. It finds them through public DNS (Cloudflare, Google and Quad9, encrypted through Cloudflare or Google if your network blocks plain DNS) and never touches the console's own DNS settings, so a DNS block that keeps the system from updating stays in place. To find older patches it also asks [Prospero Patches](https://prosperopatches.com/) (PS5) or [Orbis Patches](https://orbispatches.com/) (PS4) which versions exist for a game. That lookup sends the game's title ID and nothing else.
+From Sony's update servers, the same files the console would download itself. Nothing gets modified. To find Sony's servers PatchDL uses public DNS (Cloudflare, Google, Quad9) and leaves the console's DNS settings alone, so if you block system updates through DNS, that block stays in place.
 
-**Can I get an older patch that runs on my firmware?**
-Yes. Sony still hosts older patches, but its servers only tell your console about the newest one. When that one needs a newer firmware, PatchDL looks up the version history on [Prospero Patches](https://prosperopatches.com/) and lists the game under *Updates* with an **Old FW patch** button. Tap it and scan the QR code with your phone. Open the game on Prospero, pick the version PatchDL names (confirm the human check if one shows up) and copy the **SC** link. Paste it on your phone, and the PS5 downloads the patch from Sony and handles it like any other update.
+**How does it know about older patches?**
+Sony only tells the console about the newest patch. The version history comes from [Prospero Patches](https://prosperopatches.com/) for PS5 games and [Orbis Patches](https://orbispatches.com/) for PS4 games. PatchDL sends them the game's title ID, nothing else.
 
-**Does it change the updates?**
-No. Each package stays exactly as Sony published it, and the console's own installer applies it.
+**How do I get a specific version?**
+Open Other versions on the game, pick a version and follow the steps. You copy one link from the patch site (on the PS5 you scan a QR code and do that part on your phone), paste it, and PatchDL downloads that version from Sony. Only versions newer than the installed one can be installed.
 
-**Does it delete the package after installing?**
-Only once the install is confirmed: the game reports the new version and the console's installer recorded this exact package. If either check fails, the package stays. Switch off **Delete PKG after install** in Settings to keep every package.
+**When is the package deleted?**
+Only after the console reports the new version and its installer has registered the package. Otherwise it stays. You can turn deleting off in Settings.
 
-**Will it touch my system software?**
-No. PatchDL never downloads system software, and it only offers game updates that run on the firmware you have.
+**Do disc games work?**
+Yes. Keep the disc in the drive while the update installs.
 
-**What about disc games?**
-Put the disc in, same as with any update.
-
-**What happens if the power goes out?**
-Start PatchDL again and press Resume. Finished pieces stay on disk.
+**What if the power goes out during a download?**
+Start PatchDL again and press Resume.
 
 ## Disclaimer
 
-PatchDL is an independent project. It is not affiliated with, endorsed by or sponsored by Sony Interactive Entertainment. "PlayStation" and "PS5" are trademarks of Sony Interactive Entertainment Inc. and appear here only to name the console PatchDL works with.
+PatchDL is an independent project and not affiliated with or endorsed by Sony Interactive Entertainment. "PlayStation", "PS5" and "PS4" are trademarks of Sony Interactive Entertainment Inc.
 
-PatchDL downloads official, unmodified game updates that Sony publishes for games already installed on your console. It does not download games, does not contain or distribute Sony software, keys or game content, and does not install unsigned or modified packages. Use it with games you own, and follow the laws of your country and the terms that apply to you. This project does not support piracy, and issues about pirated content will be closed.
+PatchDL downloads official, unmodified updates for games that are already installed. It doesn't download games, doesn't contain Sony software, keys or game content, and doesn't install unsigned or modified packages. Use it with games you own. Issues about pirated content will be closed.
 
-<details>
-<summary><b>Build from source</b></summary>
-
-<br>
+## Building
 
 ```sh
-scripts/build_ps5.sh        # produces patchdl-ps5.elf
+scripts/build_ps5.sh        # builds patchdl-ps5.elf
 ```
 
-You need the [ps5-payload-dev SDK](https://github.com/ps5-payload-dev/sdk), version 0.44 or newer for firmware 1.00 to 13.60, with `libcurl` and `OpenSSL` from its [pacbrew-repo](https://github.com/ps5-payload-dev/pacbrew-repo). `libmicrohttpd` and SQLite are vendored. GitHub Actions builds every push; tagged builds become releases.
+This needs the [ps5-payload-dev SDK](https://github.com/ps5-payload-dev/sdk) (0.44 or newer) with `libcurl` and `OpenSSL` from its [pacbrew-repo](https://github.com/ps5-payload-dev/pacbrew-repo). `libmicrohttpd` and SQLite are included in the repo. Every push is built by GitHub Actions, and tags become releases.
 
-To try a build on your own console:
+To try a build on your console:
 
 ```sh
 PS5_HOST=<console-ip> scripts/deploy_ps5.sh
 ```
 
-</details>
-
 ## Credits
 
-PatchDL is written in C and builds on [libmicrohttpd](https://www.gnu.org/software/libmicrohttpd/), [libcurl](https://curl.se/), [OpenSSL](https://www.openssl.org/), [SQLite](https://sqlite.org/) and the [ps5-payload-dev SDK](https://github.com/ps5-payload-dev/sdk). The version history behind older patches comes from [Prospero Patches](https://prosperopatches.com/). Thanks to everyone behind them.
+Built on [libmicrohttpd](https://www.gnu.org/software/libmicrohttpd/), [libcurl](https://curl.se/), [OpenSSL](https://www.openssl.org/), [SQLite](https://sqlite.org/) and the [ps5-payload-dev SDK](https://github.com/ps5-payload-dev/sdk). The patch history comes from [Prospero Patches](https://prosperopatches.com/) and [Orbis Patches](https://orbispatches.com/). Thanks to everyone working on these.
 
 ## Support
 
@@ -149,6 +124,6 @@ If you like what I do, you can buy me a coffee*: [![Donate](https://img.shields.
 
 ## License
 
-PatchDL is free software under the **GNU General Public License v3.0 or later**. See [LICENSE](LICENSE). Use it, study it, change it, share it. Forks stay under the same license.
+GNU General Public License v3.0 or later, see [LICENSE](LICENSE).
 
 Copyright © 2026 Knutwurst.
