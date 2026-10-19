@@ -35,6 +35,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <sys/mount.h>
 #include <unistd.h>
 
 static struct MHD_Daemon *web_daemon;
@@ -183,7 +184,8 @@ static struct {
     int  verify_downloads;         /* SHA-256 each manifest piece (default off) */
     int  home_shortcut;            /* user wants a home-screen browser tile */
     int  max_connections;          /* parallel download connections (1..POOL_MAX_CONN) */
-} g_cfg = { "deny", 0, 1, 0, 1, 4 };
+    char download_drive[32];       /* "/data" or a mounted drive like "/mnt/ext1" */
+} g_cfg = { "deny", 0, 1, 0, 1, 4, "/data" };
 
 /* ---------- download connection pool ----------------------------------- */
 /* N worker threads share one job at a time (admit_max=1): a single download
@@ -270,13 +272,102 @@ static struct {
     volatile long long inflight_bytes[POOL_MAX_CONN]; /* per-slot live counters */
 } g_pool = { .mtx = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER };
 
-#define PATCHDL_DL_DIR    "/data/patchdl"
+#define PATCHDL_DATA_DIR  "/data/patchdl"      /* config and caches; always internal */
 #define PATCHDL_CFG_PATH  "/data/patchdl/config.json"
+
+/* ---------- download drives ---------------------------------------------
+   Packages live in <drive>/patchdl/<title>/. The drive is the internal
+   storage (/data) or a mounted drive (/mnt/extN for extended storage and
+   M.2, /mnt/usbN for USB). A title's folder stays where its download
+   started: lookups check every drive first, and only a title without a
+   folder anywhere goes to the drive chosen in Settings. */
+
+#define MAX_DRIVES 12
+
+/* Guards g_cfg.download_drive for current_root, which runs with the pool
+   lock held too: a leaf lock, taken after g_mutex or g_pool.mtx and never
+   holding anything else. Writers hold g_mutex as well. */
+static pthread_mutex_t g_drive_mtx = PTHREAD_MUTEX_INITIALIZER;
+
+static int
+drive_name_ok(const char *m) {
+    if (!strcmp(m, "/data")) return 1;
+    return (!strncmp(m, "/mnt/ext", 8) || !strncmp(m, "/mnt/usb", 8)) &&
+           isdigit((unsigned char)m[8]) && (!m[9] || (isdigit((unsigned char)m[9]) && !m[10]));
+}
+
+/* The drive is mounted right now (an unplugged USB drive is not). */
+static int
+drive_mounted(const char *drive) {
+    struct statfs sf;
+    if (!strcmp(drive, "/data")) return 1;
+    return statfs(drive, &sf) == 0 && !strcmp(sf.f_mntonname, drive);
+}
+
+/* /data first, then every mounted extN/usbN drive. Returns the count. */
+static int
+list_drives(char out[][32], int max) {
+    struct statfs *mnt;
+    int            n = 0, k;
+    snprintf(out[n++], 32, "/data");
+    /* getfsstat into our own buffer: getmntinfo shares a static one, and
+       this runs on several threads at once */
+    k = getfsstat(NULL, 0, MNT_NOWAIT);
+    if (k <= 0 || !(mnt = calloc((size_t)k + 4, sizeof *mnt))) return n;
+    k = getfsstat(mnt, (long)(((size_t)k + 4) * sizeof *mnt), MNT_NOWAIT);
+    for (int i = 0; i < k && n < max; i++) {
+        int dup = 0;
+        if (!drive_name_ok(mnt[i].f_mntonname) || !strcmp(mnt[i].f_mntonname, "/data")) continue;
+        for (int j = 0; j < n; j++) if (!strcmp(out[j], mnt[i].f_mntonname)) dup = 1;
+        if (!dup) snprintf(out[n++], 32, "%s", mnt[i].f_mntonname);
+    }
+    free(mnt);
+    return n;
+}
+
+/* Where new downloads go: <chosen drive>/patchdl, or the internal storage
+   while the chosen drive isn't there. */
+static void
+current_root(char *out, size_t sz) {
+    char drive[32];
+    pthread_mutex_lock(&g_drive_mtx);
+    snprintf(drive, sizeof drive, "%s", g_cfg.download_drive);
+    pthread_mutex_unlock(&g_drive_mtx);
+    if (!drive_name_ok(drive) || !drive_mounted(drive)) snprintf(drive, sizeof drive, "/data");
+    snprintf(out, sz, "%s/patchdl", drive);
+}
+
+/* The title's folder: an existing one on any drive, else one on the
+   current drive. title_id must already be a safe path segment. */
+static void
+title_dir(const char *title_id, char *out, size_t sz) {
+    char        drives[MAX_DRIVES][32], root[64];
+    int         n = list_drives(drives, MAX_DRIVES);
+    struct stat st;
+    for (int i = 0; i < n; i++) {
+        snprintf(out, sz, "%s/patchdl/%s", drives[i], title_id);
+        if (stat(out, &st) == 0 && S_ISDIR(st.st_mode)) return;
+    }
+    current_root(root, sizeof root);
+    snprintf(out, sz, "%s/%s", root, title_id);
+}
+
+/* mkdir the folder and its patchdl parent. */
+static void
+make_title_dir(const char *dir) {
+    char parent[288];
+    const char *slash = strrchr(dir, '/');
+    if (slash && (size_t)(slash - dir) < sizeof parent) {
+        memcpy(parent, dir, (size_t)(slash - dir));
+        parent[slash - dir] = '\0';
+        mkdir(parent, 0777);
+    }
+    mkdir(dir, 0777);
+}
 
 /* The source policy and CDN allowlist are fixed (the safety model), so they
    stay constant; only the four mutable fields above are user-controlled. */
 static const char config_tail_json[] =
-  "\"download_dir\":\"/data/patchdl (internal)\","
   "\"source_policy\":{"
   "\"official\":{\"allow_check\":true,\"allow_download\":true,\"allow_install\":true},"
   "\"external\":{\"allow_check\":true,\"allow_download\":true,\"allow_install\":true},"
@@ -546,17 +637,24 @@ path_segment_safe(const char *s) {
 }
 
 /* Validate a local PKG path for /api/install_aip: must be exactly
-   <PATCHDL_DL_DIR>/<safe-title-id>/<safe-filename>. Rejects anything
-   outside /data/patchdl/, anything with .. or unsafe chars. */
+   <drive>/patchdl/<safe-title-id>/<safe-filename>. Rejects anything
+   outside a download drive, anything with .. or unsafe chars. */
 static int
 local_install_path_safe(const char *path) {
-    const char *prefix = PATCHDL_DL_DIR "/";
-    size_t      plen   = strlen(prefix);
+    char        drives[MAX_DRIVES][32], prefix[64];
+    int         nd = list_drives(drives, MAX_DRIVES), hit = -1;
+    size_t      plen = 0;
     const char *tail, *slash;
     char        seg[64];
     size_t      len;
 
-    if (!path || strncmp(path, prefix, plen) != 0) return 0;
+    if (!path) return 0;
+    for (int i = 0; i < nd && hit < 0; i++) {
+        snprintf(prefix, sizeof prefix, "%s/patchdl/", drives[i]);
+        plen = strlen(prefix);
+        if (!strncmp(path, prefix, plen)) hit = i;
+    }
+    if (hit < 0) return 0;
     tail  = path + plen;
     slash = strchr(tail, '/');
     if (!slash || slash == tail) return 0;
@@ -764,7 +862,11 @@ queue_pkg_file(struct MHD_Connection *conn, const char *url) {
     if (!path_segment_safe(title_id) || !path_segment_safe(file))
         return queue_text(conn, MHD_HTTP_FORBIDDEN, "forbidden");
 
-    snprintf(path, sizeof(path), "%s/%s/%s", PATCHDL_DL_DIR, title_id, file);
+    {
+        char dir[160];
+        title_dir(title_id, dir, sizeof dir);
+        snprintf(path, sizeof(path), "%s/%s", dir, file);
+    }
     fd = open(path, O_RDONLY);
     if (fd < 0) {
         record_pkg_diag(url, NULL, MHD_HTTP_NOT_FOUND, 0, 0, 0);
@@ -852,14 +954,29 @@ queue_pkg_file(struct MHD_Connection *conn, const char *url) {
 
 /* ---------- status JSON ------------------------------------------------- */
 
-/* Free space on the download partition, in MB. Best-effort: 0 if unavailable. */
+/* Free space on the drive holding `path`, in MB. A folder that doesn't
+   exist yet counts as its closest existing parent. 0 if unavailable. */
+static long long
+drive_free_mb(const char *path) {
+    struct statvfs vfs;
+    char           p[288], *slash;
+    snprintf(p, sizeof p, "%s", path);
+    for (;;) {
+        if (statvfs(p, &vfs) == 0)
+            return (long long)(((unsigned long long)vfs.f_bavail *
+                                (unsigned long long)vfs.f_frsize) / (1024ULL * 1024ULL));
+        if (!(slash = strrchr(p, '/')) || slash == p) return 0;
+        *slash = '\0';
+    }
+}
+
+/* Free space where new downloads go, in MB. */
 static long long
 data_free_mb(void) {
-    struct statvfs vfs;
-    if (statvfs(PATCHDL_DL_DIR, &vfs) == 0 || statvfs("/data", &vfs) == 0)
-        return (long long)(((unsigned long long)vfs.f_bavail *
-                            (unsigned long long)vfs.f_frsize) / (1024ULL * 1024ULL));
-    return 0;
+    char root[64], *slash;
+    current_root(root, sizeof root);
+    if ((slash = strrchr(root, '/'))) *slash = '\0';   /* the drive itself */
+    return drive_free_mb(root);
 }
 
 /* Headroom kept free on /data so a download never fills the console's
@@ -876,10 +993,11 @@ space_needed(const char *path, long long total) {
     return total > have ? total - have : 0;
 }
 
-/* 1 if `need` bytes plus the margin fit; *free_out gets the free bytes. */
+/* 1 if `need` bytes plus the margin fit on the drive holding `dir`;
+   *free_out gets the free bytes. */
 static int
-space_ok(long long need, long long *free_out) {
-    long long free_b = data_free_mb() * 1024LL * 1024LL;
+space_ok(const char *dir, long long need, long long *free_out) {
+    long long free_b = drive_free_mb(dir) * 1024LL * 1024LL;
     if (free_out) *free_out = free_b;
     return need + PATCHDL_SPACE_MARGIN <= free_b;
 }
@@ -919,7 +1037,8 @@ is_title_dir_name(const char *n) {
     return 1;
 }
 
-/* Bytes in /data/patchdl/<title>/ folders, for the storage tile. */
+/* Bytes in <drive>/patchdl/<title>/ folders on every drive, for the
+   storage tile. */
 static long long
 downloads_bytes(void) {
     DIR           *d, *sd;
@@ -928,19 +1047,25 @@ downloads_bytes(void) {
     char           dir[288], path[560];
     long long      sum = 0;
 
-    if (!(d = opendir(PATCHDL_DL_DIR))) return 0;
-    while ((de = readdir(d))) {
-        if (!is_title_dir_name(de->d_name)) continue;
-        snprintf(dir, sizeof dir, "%s/%s", PATCHDL_DL_DIR, de->d_name);
-        if (!(sd = opendir(dir))) continue;
-        while ((fe = readdir(sd))) {
-            if (fe->d_name[0] == '.') continue;
-            snprintf(path, sizeof path, "%s/%s", dir, fe->d_name);
-            if (!stat(path, &st) && S_ISREG(st.st_mode)) sum += (long long)st.st_size;
+    char           drives[MAX_DRIVES][32], root[64];
+    int            nd = list_drives(drives, MAX_DRIVES);
+
+    for (int k = 0; k < nd; k++) {
+        snprintf(root, sizeof root, "%s/patchdl", drives[k]);
+        if (!(d = opendir(root))) continue;
+        while ((de = readdir(d))) {
+            if (!is_title_dir_name(de->d_name)) continue;
+            snprintf(dir, sizeof dir, "%s/%s", root, de->d_name);
+            if (!(sd = opendir(dir))) continue;
+            while ((fe = readdir(sd))) {
+                if (fe->d_name[0] == '.') continue;
+                snprintf(path, sizeof path, "%s/%s", dir, fe->d_name);
+                if (!stat(path, &st) && S_ISREG(st.st_mode)) sum += (long long)st.st_size;
+            }
+            closedir(sd);
         }
-        closedir(sd);
+        closedir(d);
     }
-    closedir(d);
     return sum;
 }
 
@@ -955,17 +1080,18 @@ titles_gen(void) {
 
 static char *
 build_status_json(void) {
-    char  ip[INET_ADDRSTRLEN];
-    char *out = malloc(768);
+    char  ip[INET_ADDRSTRLEN], root[64];
+    char *out = malloc(896);
     if (!out) return NULL;
     lan_ipv4(ip, sizeof ip);
-    snprintf(out, 768,
+    current_root(root, sizeof root);
+    snprintf(out, 896,
              "{\"firmware\":\"%s\","
              "\"firmware_build\":\"0x%08x\","
              "\"dns_guard\":\"Active\","
              "\"resolver\":\"Internal allowlist\","
              "\"free_space_mb\":%lld,"
-             "\"download_dir\":\"/data/patchdl (internal)\","
+             "\"download_dir\":\"%s\","
              "\"lan_ip\":\"%s\","
              "\"http_port\":%d,"
              "\"version\":\"%s\","
@@ -973,7 +1099,7 @@ build_status_json(void) {
              "\"downloads_bytes\":%lld,"
              "\"rescan_ms\":[%ld,%ld,%ld],"
              "\"rescan_step\":\"%s / %s\",\"rescan_running_ms\":%ld}",
-             g_fw.str, g_fw.bin, data_free_mb(), ip, PATCHDL_HTTP_PORT,
+             g_fw.str, g_fw.bin, data_free_mb(), root, ip, PATCHDL_HTTP_PORT,
              PATCHDL_VERSION, titles_gen(), downloads_bytes(),
              g_rescan_ms[0], g_rescan_ms[1], g_rescan_ms[2],
              g_rescan_step, patchdl_scan_step(),
@@ -987,8 +1113,9 @@ build_status_json(void) {
    are appended from config_tail_json. Caller owns the result (queue_json_owned). */
 static char *
 build_config_json(void) {
-    char head[224];
+    char head[384], root[64];
 
+    current_root(root, sizeof root);
     pthread_mutex_lock(&g_mutex);
     snprintf(head, sizeof(head),
              "{\"default_policy\":\"%s\","
@@ -996,13 +1123,14 @@ build_config_json(void) {
              "\"delete_pkg_after_install\":%s,"
              "\"verify_downloads\":%s,"
              "\"home_shortcut\":%s,"
-             "\"max_connections\":%d,",
+             "\"max_connections\":%d,"
+             "\"download_drive\":\"%s\",\"download_dir\":\"%s\",",
              g_cfg.default_policy[0] ? g_cfg.default_policy : "deny",
              g_cfg.install_after_download ? "true" : "false",
              g_cfg.delete_pkg_after_install ? "true" : "false",
              g_cfg.verify_downloads ? "true" : "false",
              g_cfg.home_shortcut ? "true" : "false",
-             g_cfg.max_connections);
+             g_cfg.max_connections, g_cfg.download_drive, root);
     pthread_mutex_unlock(&g_mutex);
 
     char *out = malloc(strlen(head) + sizeof(config_tail_json));
@@ -1018,7 +1146,7 @@ static void
 save_config(void) {
     FILE *f;
 
-    mkdir(PATCHDL_DL_DIR, 0777);
+    mkdir(PATCHDL_DATA_DIR, 0777);
     f = fopen(PATCHDL_CFG_PATH, "w");
     if (!f) return;
 
@@ -1029,13 +1157,13 @@ save_config(void) {
             "\"delete_pkg_after_install\":%s,\n"
             "\"verify_downloads\":%s,\n"
             "\"home_shortcut\":%s,\n"
-            "\"max_connections\":%d,\n\"titles\":{",
+            "\"max_connections\":%d,\n\"download_drive\":\"%s\",\n\"titles\":{",
             g_cfg.default_policy[0] ? g_cfg.default_policy : "deny",
             g_cfg.install_after_download ? "true" : "false",
             g_cfg.delete_pkg_after_install ? "true" : "false",
             g_cfg.verify_downloads ? "true" : "false",
             g_cfg.home_shortcut ? "true" : "false",
-            g_cfg.max_connections);
+            g_cfg.max_connections, g_cfg.download_drive);
     for (size_t i = 0; i < g_title_count; i++)
         fprintf(f, "%s\"%s\":%s", i ? "," : "",
                 g_titles[i].title_id, g_titles[i].enabled ? "true" : "false");
@@ -1111,6 +1239,15 @@ load_config(void) {
         json_get_int(buf, "max_connections", g_cfg.max_connections);
     if (g_cfg.max_connections < 1) g_cfg.max_connections = 1;
     if (g_cfg.max_connections > POOL_MAX_CONN) g_cfg.max_connections = POOL_MAX_CONN;
+    {
+        char drive[32] = "";
+        json_get_str(buf, "download_drive", drive, sizeof drive);
+        if (drive_name_ok(drive)) {
+            pthread_mutex_lock(&g_drive_mtx);
+            snprintf(g_cfg.download_drive, sizeof g_cfg.download_drive, "%s", drive);
+            pthread_mutex_unlock(&g_drive_mtx);
+        }
+    }
 
     overlay_title_policy(buf, g_titles, g_title_count);
     free(buf);
@@ -1508,7 +1645,11 @@ title_pkg_path(const char *title_id, const char *patch_url,
         snprintf(name, sizeof(name), "%s.pkg",
                  path_segment_safe(title_id) ? title_id : "patch");
     }
-    snprintf(out, out_sz, "%s/%s/%s", PATCHDL_DL_DIR, title_id, name);
+    {
+        char dir[160];
+        title_dir(title_id, dir, sizeof dir);
+        snprintf(out, out_sz, "%s/%s", dir, name);
+    }
 }
 
 static int
@@ -1522,7 +1663,9 @@ url_is_manifest(const char *url) {
 
 static void
 title_state_path(const char *title_id, char *out, size_t sz) {
-    snprintf(out, sz, "%s/%s/state.json", PATCHDL_DL_DIR, title_id);
+    char dir[160];
+    title_dir(title_id, dir, sizeof dir);
+    snprintf(out, sz, "%s/state.json", dir);
 }
 
 static void
@@ -1532,15 +1675,24 @@ remove_dl_state(const char *title_id) {
     unlink(path);
 }
 
-/* Delete a title's internal download directory and its contents. Best-effort;
-   only ever touches /data/patchdl (self-protecting against a bad segment). */
+/* Delete a title's download folder and its contents. Best-effort; only ever
+   touches <drive>/patchdl/<title> (self-protecting against a bad segment). */
+static void remove_dir_files(const char *dir);
+
 static void
 remove_title_dir(const char *title_id) {
-    char           dir[288], path[560];
+    char dir[288];
+    if (!path_segment_safe(title_id)) return;
+    title_dir(title_id, dir, sizeof dir);
+    remove_dir_files(dir);
+}
+
+/* Delete the files in one flat download folder, then the folder. */
+static void
+remove_dir_files(const char *dir) {
+    char           path[560];
     DIR           *d;
     struct dirent *e;
-    if (!path_segment_safe(title_id)) return;
-    snprintf(dir, sizeof(dir), "%s/%s", PATCHDL_DL_DIR, title_id);
     if ((d = opendir(dir))) {
         while ((e = readdir(d))) {
             if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
@@ -1557,7 +1709,9 @@ remove_title_dir(const char *title_id) {
 
 static void
 manual_source_path(const char *title_id, char *out, size_t sz) {
-    snprintf(out, sz, "%s/%s/manual.json", PATCHDL_DL_DIR, title_id);
+    char dir[160];
+    title_dir(title_id, dir, sizeof dir);
+    snprintf(out, sz, "%s/manual.json", dir);
 }
 
 /* Persist the pasted link next to the download so install and resume still
@@ -1566,9 +1720,8 @@ static void
 save_manual_source(const char *title_id, const char *url, const char *version) {
     char  dir[288], path[320];
     FILE *f;
-    snprintf(dir, sizeof dir, "%s/%s", PATCHDL_DL_DIR, title_id);
-    mkdir(PATCHDL_DL_DIR, 0777);
-    mkdir(dir, 0777);
+    title_dir(title_id, dir, sizeof dir);
+    make_title_dir(dir);
     manual_source_path(title_id, path, sizeof path);
     if ((f = fopen(path, "w"))) {
         fprintf(f, "{\"url\":\"%s\",\"version\":\"%s\"}\n", url, version);
@@ -1595,7 +1748,7 @@ clear_manual_source(const char *title_id) {
     set_manual_source(title_id, "", "");
     manual_source_path(title_id, path, sizeof path);
     unlink(path);
-    snprintf(dir, sizeof dir, "%s/%s", PATCHDL_DL_DIR, title_id);
+    title_dir(title_id, dir, sizeof dir);
     rmdir(dir);   /* fails while the pkg is still there; the cancel path removes it */
 }
 
@@ -2052,8 +2205,7 @@ admit_next(void) {
 
     /* ---- network + disk, NO pool lock ---- */
     memset(&mf, 0, sizeof mf);
-    mkdir(PATCHDL_DL_DIR, 0777);
-    mkdir(dir, 0777);
+    make_title_dir(dir);
     if (is_manifest) {
         if (patchdl_fetch_manifest(murl, &mf) != 0 || mf.count <= 0) {
             patchdl_http_last_error(fstep, sizeof fstep, &fcurl, &fhttp);
@@ -2062,7 +2214,7 @@ admit_next(void) {
             total = mf.total;
             adopted = adopt_by_size(dir, dest, total);
             need  = space_needed(dest, total);
-            if (!space_ok(need, &free_b)) no_space = 1;
+            if (!space_ok(dir, need, &free_b)) no_space = 1;
             else fd = open(dest, O_RDWR | O_CREAT, 0666);
             if (fd >= 0) {
                 struct stat st;
@@ -2447,7 +2599,11 @@ do_download(struct MHD_Connection *conn, const char *title_id,
 
     {
         snprintf(job->manifest_url, sizeof job->manifest_url, "%s", patch_url);
-        snprintf(job->dir, sizeof job->dir, "%s/%s", PATCHDL_DL_DIR, title_id);
+        title_dir(title_id, job->dir, sizeof job->dir);
+        /* create it now: from here on every lookup (sidecar, package,
+           install) finds this folder, even if the drive in Settings
+           changes before the download starts */
+        make_title_dir(job->dir);
         title_pkg_path(title_id, patch_url, job->dest, sizeof job->dest);
         job->is_manifest = url_is_manifest(patch_url);
     }
@@ -2587,7 +2743,8 @@ download_complete(const char *title_id) {
     return json_get_ll(buf, "done_bytes", 0) >= json_get_ll(buf, "total", 0);
 }
 
-/* Everything PatchDL keeps under /data/patchdl, one entry per title folder,
+/* Everything PatchDL keeps in <drive>/patchdl on every drive, one entry per
+   title folder,
    so the UI can show what takes space and delete it, including folders of
    games that are no longer installed. */
 static char *
@@ -2598,8 +2755,13 @@ build_storage_json(void) {
     long long      sum = 0;
     int            first = 1;
 
+    char           drives[MAX_DRIVES][32], root[64];
+    int            nd = list_drives(drives, MAX_DRIVES);
+
     jbuf_append(&j, "{\"items\":[");
-    if ((d = opendir(PATCHDL_DL_DIR))) {
+    for (int k = 0; k < nd; k++) {
+        snprintf(root, sizeof root, "%s/patchdl", drives[k]);
+        if (!(d = opendir(root))) continue;
         while ((de = readdir(d))) {
             char           dir[288], path[560], name[128] = "", inst[16] = "";
             char           ver[16] = "", buf[2048], pkgname[160] = "";
@@ -2613,7 +2775,7 @@ build_storage_json(void) {
             dl_job_t      *job;
 
             if (!is_title_dir_name(de->d_name)) continue;
-            snprintf(dir, sizeof dir, "%s/%s", PATCHDL_DL_DIR, de->d_name);
+            snprintf(dir, sizeof dir, "%s/%s", root, de->d_name);
             if (stat(dir, &st) || !S_ISDIR(st.st_mode)) continue;
             if ((sd = opendir(dir))) {
                 while ((fe = readdir(sd))) {
@@ -2692,11 +2854,39 @@ build_storage_json(void) {
             jbuf_append(&j, ",\"version\":");  jbuf_append_ver_or_null(&j, ver);
             jbuf_append(&j, ",\"installed_version\":");
             jbuf_append_ver_or_null(&j, inst);
+            jbuf_append(&j, ",\"drive\":");  jbuf_append_str(&j, drives[k]);
             jbuf_append(&j, "}");
         }
         closedir(d);
     }
     jbuf_appendf(&j, "],\"total_bytes\":%lld}", sum);
+    return j.buf;
+}
+
+/* GET /api/drives: the drives packages can go to, with free and total
+   space, and which one new downloads use. */
+static char *
+build_drives_json(void) {
+    char  drives[MAX_DRIVES][32], root[64];
+    int   nd = list_drives(drives, MAX_DRIVES);
+    jbuf_t j = {0};
+
+    current_root(root, sizeof root);
+    jbuf_append(&j, "{\"current\":");
+    jbuf_append_str(&j, root);
+    jbuf_append(&j, ",\"drives\":[");
+    for (int i = 0; i < nd; i++) {
+        struct statvfs vfs;
+        unsigned long long fr = 0, tot = 0;
+        if (statvfs(drives[i], &vfs) == 0) {
+            fr  = (unsigned long long)vfs.f_bavail * vfs.f_frsize / (1024ULL * 1024ULL);
+            tot = (unsigned long long)vfs.f_blocks * vfs.f_frsize / (1024ULL * 1024ULL);
+        }
+        jbuf_append(&j, i ? ",{\"path\":" : "{\"path\":");
+        jbuf_append_str(&j, drives[i]);
+        jbuf_appendf(&j, ",\"free_mb\":%llu,\"total_mb\":%llu}", fr, tot);
+    }
+    jbuf_append(&j, "]}");
     return j.buf;
 }
 
@@ -3150,7 +3340,9 @@ handle_download_url(struct MHD_Connection *conn, const char *body) {
     patchdl_manifest_free(&mf);
     {
         long long free_b;
-        if (!space_ok(found, &free_b)) {
+        char      dir[160];
+        title_dir(tid, dir, sizeof dir);
+        if (!space_ok(dir, found, &free_b)) {
             snprintf(resp, sizeof resp,
                      "{\"ok\":false,\"reason\":\"no_space\","
                      "\"need_bytes\":%lld,\"free_bytes\":%lld}", found, free_b);
@@ -3323,6 +3515,16 @@ handle_config_post(struct MHD_Connection *conn, const char *body) {
         json_get_int(body, "max_connections", g_cfg.max_connections);
     if (g_cfg.max_connections < 1) g_cfg.max_connections = 1;
     if (g_cfg.max_connections > POOL_MAX_CONN) g_cfg.max_connections = POOL_MAX_CONN;
+    {
+        /* only a drive that is mounted right now can be picked */
+        char drive[32] = "";
+        json_get_str(body, "download_drive", drive, sizeof drive);
+        if (drive_name_ok(drive) && drive_mounted(drive)) {
+            pthread_mutex_lock(&g_drive_mtx);
+            snprintf(g_cfg.download_drive, sizeof g_cfg.download_drive, "%s", drive);
+            pthread_mutex_unlock(&g_drive_mtx);
+        }
+    }
     mc = g_cfg.max_connections;
     pthread_mutex_unlock(&g_mutex);
 
@@ -3414,6 +3616,21 @@ on_request(void *cls, struct MHD_Connection *conn, const char *url,
             tid[tl] = '\0';
             if (!is_title_dir_name(tid))
                 return queue_text(conn, MHD_HTTP_FORBIDDEN, "forbidden");
+            {
+                /* The same title can have a folder on two drives (one
+                   downloaded while the other drive was unplugged). Delete
+                   the one the list showed, not just the first one found. */
+                char drive[32] = "", dir[160], cur[160];
+                json_get_str(body, "drive", drive, sizeof drive);
+                if (drive[0] && drive_name_ok(drive)) {
+                    snprintf(dir, sizeof dir, "%s/patchdl/%s", drive, tid);
+                    title_dir(tid, cur, sizeof cur);
+                    if (strcmp(dir, cur)) {   /* not the folder downloads use */
+                        remove_dir_files(dir);
+                        return queue_json(conn, MHD_HTTP_OK, "{\"ok\":true,\"cancelled\":true}");
+                    }
+                }
+            }
             return do_cancel(conn, tid);
         }
         if (!strcmp(url, "/api/install_uri")) {
@@ -3459,7 +3676,7 @@ on_request(void *cls, struct MHD_Connection *conn, const char *url,
             if (!local_install_path_safe(path))
                 return queue_json(conn, MHD_HTTP_FORBIDDEN,
                                   "{\"ok\":false,\"reason\":\"path_not_allowed\","
-                                  "\"hint\":\"must be " PATCHDL_DL_DIR
+                                  "\"hint\":\"must be <drive>/patchdl"
                                   "/<title_id>/<filename>\"}");
             if (tid[0] && !path_segment_safe(tid))
                 return queue_json(conn, MHD_HTTP_BAD_REQUEST,
@@ -3731,6 +3948,8 @@ on_request(void *cls, struct MHD_Connection *conn, const char *url,
         return queue_json_owned(conn, MHD_HTTP_OK, strdup(resp));
     }
 
+    if (!strcmp(url, "/api/drives"))
+        return queue_json_owned(conn, MHD_HTTP_OK, build_drives_json());
     if (!strcmp(url, "/api/versions")) {
         const char *want = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "title");
         return queue_versions(conn, want ? want : "");

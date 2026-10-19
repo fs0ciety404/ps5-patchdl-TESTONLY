@@ -619,6 +619,7 @@ h2 { font-size: 18px; line-height: 1.2; }
 .settings-grid { display: grid; gap: 12px; }
 .field { display: grid; gap: 6px; }
 .field span, .allowlist > span, .source-policy > span { color: var(--muted); font-size: var(--fs-xs); font-weight: 700; }
+.field-hint { color: var(--muted); font-size: var(--fs-xs); font-style: normal; }
 .field input, .field select {
   min-height: 44px;
   padding: 0 12px;

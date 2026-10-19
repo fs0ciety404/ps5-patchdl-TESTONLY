@@ -674,11 +674,12 @@ patchdl_install_local_pkg(const char *local_path, const char *expected_title_id,
         }
 
         snprintf(file_uri, sizeof(file_uri), "file://%s", sdk_path);
-        title_dir = strstr(local_path, "/data/patchdl/");
+        /* <drive>/patchdl/<title>/<file>, on any download drive */
+        title_dir = strstr(local_path, "/patchdl/");
         file_base = strrchr(local_path, '/');
-        if (title_dir && file_base && file_base > title_dir + strlen("/data/patchdl/")) {
+        if (title_dir && file_base && file_base > title_dir + strlen("/patchdl/")) {
             char title_id[32] = {0};
-            const char *t = title_dir + strlen("/data/patchdl/");
+            const char *t = title_dir + strlen("/patchdl/");
             size_t tlen = (size_t)(file_base - t);
             if (tlen > 0 && tlen < sizeof(title_id)) {
                 char ip[INET_ADDRSTRLEN] = {0};

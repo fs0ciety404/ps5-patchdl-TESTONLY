@@ -47,6 +47,7 @@ typedef int (*ai_init_fn)(void);
 typedef int (*ai_install_dir_fn)(const char *title_id, const char *parent_dir,
                                   void *opts);
 typedef int (*ai_install_all_fn)(void *opts);
+typedef int (*ai_uninstall_fn)(const char *title_id);
 
 static intptr_t
 dynsym_by_name(const char *sym) {
@@ -123,7 +124,7 @@ patchdl_tile_install_if_needed(char *msg, size_t msg_sz) {
     ai_init_fn        ai_initialize    = NULL;
     ai_install_dir_fn ai_install_title = NULL;
     ai_install_all_fn ai_install_all   = NULL;
-    int               rc;
+    int               rc, was_registered;
 
     snprintf(base_dir,    sizeof base_dir,    "/user/app/%s",                  TILE_TITLE_ID);
     snprintf(sce_sys_dir, sizeof sce_sys_dir, "/user/app/%s/sce_sys",          TILE_TITLE_ID);
@@ -203,6 +204,31 @@ patchdl_tile_install_if_needed(char *msg, size_t msg_sz) {
     if (mkdir(sce_sys_dir, 0755) && errno != EEXIST) {
         snprintf(msg, msg_sz, "mkdir %s failed errno=%d", sce_sys_dir, errno);
         return -1;
+    }
+
+    /* The home screen keeps the section (Games or Media) a tile was first
+       registered in. A tile from an older PatchDL sits under Games; take
+       it off before registering it again so it moves to Media. Only ever
+       PatchDL's own tile id is passed here. */
+    {
+        struct stat st;
+        /* an older param.json on disk, whether or not the receipt exists
+           (tiles from before 0.0.7 have none) */
+        was_registered = stat(param_path, &st) == 0 &&
+                         !file_matches(param_path, tile_param_json, tile_param_json_size);
+    }
+    if (was_registered) {
+        ai_uninstall_fn ai_uninstall = (ai_uninstall_fn)dynsym_by_name(
+            "sceAppInstUtilAppUnInstall");
+        if (ai_uninstall) (void)ai_uninstall(TILE_TITLE_ID);
+        if (mkdir(base_dir, 0755) && errno != EEXIST) {
+            snprintf(msg, msg_sz, "mkdir %s failed errno=%d", base_dir, errno);
+            return -1;
+        }
+        if (mkdir(sce_sys_dir, 0755) && errno != EEXIST) {
+            snprintf(msg, msg_sz, "mkdir %s failed errno=%d", sce_sys_dir, errno);
+            return -1;
+        }
     }
 
     unlink(receipt_path);

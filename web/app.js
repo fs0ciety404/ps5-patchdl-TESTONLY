@@ -439,7 +439,7 @@ function bindElements() {
     storageTotal: document.getElementById("storageTotal"),
     searchInput: document.getElementById("searchInput"),
     defaultPolicy: document.getElementById("defaultPolicy"),
-    downloadDir: document.getElementById("downloadDir"),
+    downloadDrive: document.getElementById("downloadDrive"),
     installAfterDownload: document.getElementById("installAfterDownload"),
     deleteAfterInstall: document.getElementById("deleteAfterInstall"),
     verifyDownloads: document.getElementById("verifyDownloads"),
@@ -522,7 +522,7 @@ function setView(view) {
     else b.removeAttribute("aria-current");
   });
   document.querySelectorAll(".view").forEach((s) => s.classList.toggle("is-active", s.dataset.view === view));
-  if (view === "settings") loadStorage();
+  if (view === "settings") { loadStorage(); loadDrives(); }
 }
 
 async function loadInitialData({ quiet = false } = {}) {
@@ -653,7 +653,7 @@ function setConnections(n) {
 
 function renderSettings() {
   els.defaultPolicy.value = state.config.default_policy || "deny";
-  els.downloadDir.value = state.config.download_dir || "";
+  renderDrives();
   els.installAfterDownload.checked = Boolean(state.config.install_after_download);
   els.deleteAfterInstall.checked = Boolean(state.config.delete_pkg_after_install);
   if (els.verifyDownloads) els.verifyDownloads.checked = Boolean(state.config.verify_downloads);
@@ -1337,6 +1337,37 @@ const STORAGE_STATE = {
 
 // What PatchDL keeps under /data/patchdl, one row per title folder, with a
 // delete button that also works for games that are no longer installed.
+/* ---------------- download drive ---------------- */
+
+let drives = null;   // from /api/drives: [{path, free_mb, total_mb}]
+
+function driveLabel(path) {
+  return path === "/data" ? t("settings.driveInternal")
+    : t("settings.driveNamed", { name: path.replace(/^\/mnt\//, "") });
+}
+
+function renderDrives() {
+  const sel = els.downloadDrive;
+  if (!sel) return;
+  const current = state.config.download_drive || "/data";
+  const list = drives || [{ path: current }];
+  sel.replaceChildren(...list.map((d) => {
+    const opt = document.createElement("option");
+    opt.value = d.path;
+    opt.textContent = d.free_mb != null
+      ? `${driveLabel(d.path)} · ${t("rail.free", { space: formatMb(d.free_mb) })}`
+      : driveLabel(d.path);
+    opt.selected = d.path === current;
+    return opt;
+  }));
+}
+
+async function loadDrives() {
+  const data = await fetchJson("/api/drives");
+  if (data && Array.isArray(data.drives)) drives = data.drives;
+  renderDrives();
+}
+
 async function loadStorage() {
   if (!els.storageList) return;
   let data;
@@ -1362,7 +1393,7 @@ async function loadStorage() {
     row.className = "storage-row";
     row.innerHTML = `
       <span><strong>${escapeHtml(item.name || item.title_id)}</strong><br>
-        <em>${escapeHtml(item.title_id)}${item.version ? ` · ${escapeHtml(item.version)}` : ""} · ${escapeHtml(storageRelation(item))}</em></span>
+        <em>${escapeHtml(item.title_id)}${item.version ? ` · ${escapeHtml(item.version)}` : ""} · ${escapeHtml(storageRelation(item))}${item.drive && item.drive !== "/data" ? ` · ${escapeHtml(driveLabel(item.drive))}` : ""}</em></span>
       <span class="pill ${info.className}">${t(`storage.state.${stateKey}`)}</span>
       <b>${formatBytes(item.bytes)}</b>
     `;
@@ -1390,7 +1421,7 @@ async function deleteStorage(item) {
   const label = item.name || item.title_id;
   if (!window.confirm(t("storage.confirmDelete", { name: label, size: formatBytes(item.bytes) }))) return;
   try {
-    await postJson(API.storageDelete(item.title_id), {});
+    await postJson(API.storageDelete(item.title_id), { drive: item.drive || "" });
     showToast(t("toast.storageDeleted", { name: label }));
   } catch (error) {
     showToast(t("toast.nameMessage", { name: label, message: reasonText(error) }));
@@ -1435,7 +1466,7 @@ async function saveConfig() {
   const config = {
     ...state.config,
     default_policy: els.defaultPolicy.value,
-    download_dir: els.downloadDir.value.trim(),
+    download_drive: els.downloadDrive.value || state.config.download_drive || "/data",
     install_after_download: els.installAfterDownload.checked,
     delete_pkg_after_install: els.deleteAfterInstall.checked,
     verify_downloads: els.verifyDownloads ? els.verifyDownloads.checked : Boolean(state.config.verify_downloads),
