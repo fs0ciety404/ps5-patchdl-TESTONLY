@@ -174,6 +174,20 @@ url_host(const char *url, char *out, size_t out_sz) {
     return 0;
 }
 
+/* The console's default socket receive buffer (64 KB) holds one connection
+   to ~11 MB/s; asking for more gets the system maximum (512 KB), which lets
+   a single connection reach ~45 MB/s. */
+#define PATCHDL_RCVBUF_BYTES (4 * 1024 * 1024)
+
+static int
+sockopt_rcvbuf_cb(void *clientp, curl_socket_t fd, curlsocktype purpose) {
+    int sz = PATCHDL_RCVBUF_BYTES;
+    (void)clientp;
+    if (purpose == CURLSOCKTYPE_IPCXN)
+        (void)setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &sz, sizeof sz);  /* best effort */
+    return CURL_SOCKOPT_OK;
+}
+
 /* ---------- HTTP GET via curl ------------------------------------------- */
 
 static size_t
@@ -506,6 +520,7 @@ http_download_to_file_progress(const char *url, FILE *fp, long long *bytes_out,
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME,  30L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT,       "patchdl/1.0");
+    curl_easy_setopt(curl, CURLOPT_SOCKOPTFUNCTION, sockopt_rcvbuf_cb);
     if (range_start > 0) {
         snprintf(range_hdr, sizeof(range_hdr), "%lld-", range_start);
         curl_easy_setopt(curl, CURLOPT_RANGE, range_hdr);
@@ -832,15 +847,26 @@ patchdl_http_download_manifest(const char *manifest_url, const char *dest_path,
 void patchdl_net_global_init(void)    { curl_global_init(CURL_GLOBAL_ALL); }
 void patchdl_net_global_cleanup(void) { curl_global_cleanup(); }
 
+/* Each write to /data costs about the same whatever its size, and curl hands
+   the body over in ~2 KB pieces: writing each one straight to disk held a
+   download to ~8 MB/s in total. Collecting them into 2 MB blocks first lets
+   the disk keep up with a gigabit line. */
+#define PATCHDL_PIECE_WBUF   (2 * 1024 * 1024)
+
 /* Write sink for one piece: pwrite at a fixed base offset (concurrent
    non-overlapping pieces of the same fd are safe), tee into SHA-256 if asked,
    and publish bytes-so-far for live progress. A resumed piece starts at
    `resume` bytes; see piece_header_cb and piece_write_cb for how a server
-   that ignores the range is handled. */
+   that ignores the range is handled. Bytes are collected in wbuf and
+   written in blocks; `written` counts bytes received, `flushed` the ones
+   already on disk. */
 typedef struct {
     int                 fd;
     long long           base;
     long long           written;
+    long long           flushed;
+    unsigned char      *wbuf;         /* NULL: write each chunk directly */
+    size_t              wlen;
     long long           size;         /* the piece's length: never write past it */
     long long           resume;       /* bytes of the piece already on disk */
     long long           range_start;  /* from Content-Range, -1 if none */
@@ -886,11 +912,31 @@ piece_header_cb(char *b, size_t size, size_t nitems, void *ud) {
     return n;
 }
 
+/* Write len bytes at the piece's flushed position. 0 on success. */
+static int
+piece_pwrite(piece_sink_t *s, const unsigned char *p, size_t len) {
+    while (len > 0) {
+        ssize_t w = pwrite(s->fd, p, len, (off_t)(s->base + s->flushed));
+        if (w <= 0) return -1;
+        p += w; len -= (size_t)w;
+        s->flushed += w;
+    }
+    if (s->bytes_slot) *s->bytes_slot = s->flushed;
+    return 0;
+}
+
+/* Put the collected bytes on disk. 0 on success. */
+static int
+piece_flush(piece_sink_t *s) {
+    int rc = s->wlen ? piece_pwrite(s, s->wbuf, s->wlen) : 0;
+    s->wlen = 0;
+    return rc;
+}
+
 static size_t
 piece_write_cb(void *ptr, size_t size, size_t nmemb, void *ud) {
     piece_sink_t *s = (piece_sink_t *)ud;
     size_t        n = size * nmemb;
-    ssize_t       w;
     if (n == 0) return 0;
     if (s->resume && !s->checked) {
         long code = 0;
@@ -898,7 +944,8 @@ piece_write_cb(void *ptr, size_t size, size_t nmemb, void *ud) {
         curl_easy_getinfo(s->curl, CURLINFO_RESPONSE_CODE, &code);
         if (code != 206) {
             /* the server sent the whole piece: start it over in place */
-            s->written = 0;
+            s->written = s->flushed = 0;
+            if (s->bytes_slot) *s->bytes_slot = 0;
             if (s->md) EVP_DigestInit_ex(s->md, s->md_type, NULL);
         } else if (s->range_start != s->resume) {
             s->bad_range = 1;
@@ -907,11 +954,21 @@ piece_write_cb(void *ptr, size_t size, size_t nmemb, void *ud) {
     }
     /* more than the piece holds would land in the next piece's bytes */
     if (s->size > 0 && s->written + (long long)n > s->size) return 0;
-    w = pwrite(s->fd, ptr, n, (off_t)(s->base + s->written));
-    if (w < 0 || (size_t)w != n) return 0;   /* short write -> curl errors out */
     if (s->md) EVP_DigestUpdate(s->md, ptr, n);
+    if (!s->wbuf) {
+        if (piece_pwrite(s, ptr, n)) return 0;   /* short write -> curl errors out */
+    } else {
+        const unsigned char *p = ptr;
+        size_t               left = n;
+        while (left > 0) {
+            size_t take = PATCHDL_PIECE_WBUF - s->wlen;
+            if (take > left) take = left;
+            memcpy(s->wbuf + s->wlen, p, take);
+            s->wlen += take; p += take; left -= take;
+            if (s->wlen == PATCHDL_PIECE_WBUF && piece_flush(s)) return 0;
+        }
+    }
     s->written += (long long)n;
-    if (s->bytes_slot) *s->bytes_slot = s->written;
     return n;
 }
 
@@ -953,6 +1010,7 @@ patchdl_http_download_piece(const char *url, int fd,
     sink.size        = file_size;
     sink.resume      = resume_from;
     sink.written     = resume_from;
+    sink.flushed     = resume_from;
     sink.range_start = -1;
     sink.bytes_slot  = ctx ? ctx->bytes_slot : NULL;
     if (sink.bytes_slot) *sink.bytes_slot = resume_from;
@@ -972,7 +1030,7 @@ patchdl_http_download_piece(const char *url, int fd,
             }
             if (drc) {                      /* unreadable: fetch it all again */
                 EVP_DigestInit_ex(sink.md, sink.md_type, NULL);
-                sink.resume = sink.written = 0;
+                sink.resume = sink.written = sink.flushed = 0;
                 if (sink.bytes_slot) *sink.bytes_slot = 0;
             }
         }
@@ -1015,17 +1073,22 @@ patchdl_http_download_piece(const char *url, int fd,
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME,  30L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT,       "patchdl/1.0");
+    curl_easy_setopt(curl, CURLOPT_SOCKOPTFUNCTION, sockopt_rcvbuf_cb);
     if (ctx && ctx->abort) {
         curl_easy_setopt(curl, CURLOPT_NOPROGRESS,       0L);
         curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, piece_xfer_cb);
         curl_easy_setopt(curl, CURLOPT_XFERINFODATA,     (void *)ctx->abort);
     }
 
+    sink.wbuf = malloc(PATCHDL_PIECE_WBUF);   /* NULL: slower, still correct */
     res = curl_easy_perform(curl);
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
     note_curl_result(host, res);
     curl_easy_cleanup(curl);
     curl_slist_free_all(rl);
+    /* also after a failure or pause: what arrived is kept for a resume */
+    if (piece_flush(&sink) && res == CURLE_OK) res = CURLE_WRITE_ERROR;
+    free(sink.wbuf);
 
     if (curl_rc_out)   *curl_rc_out   = (int)res;
     if (http_code_out) *http_code_out = http_code;
