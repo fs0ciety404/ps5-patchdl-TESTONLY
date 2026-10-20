@@ -250,7 +250,8 @@ typedef struct dl_job {
     int                verifying;      /* admit is hashing a package found on disk */
     int                in_admit;       /* admit_next holds this job with the lock dropped */
     long long          verify_bytes;   /* bytes hashed so far */
-    long long          free_bytes;     /* rc -3: bytes free on /data at the time */
+    long long          free_bytes;     /* rc -3: bytes free on that drive at the time */
+    int                space_install;  /* rc -3: short because the install needs room too */
     int                last_curl_rc;   /* CURLcode from the most recent piece */
     char               fail_step[24];  /* why admit failed (manifest fetch), or "" */
     long               last_http_code; /* HTTP status from the most recent piece */
@@ -1461,8 +1462,9 @@ build_downloads_json(void) {
         jbuf_appendf(&j, ",\"rc\":%d,\"last_curl_rc\":%d,\"last_http_code\":%ld",
                      job->rc, job->last_curl_rc, job->last_http_code);
         if (job->rc == -3)
-            jbuf_appendf(&j, ",\"need_bytes\":%lld,\"free_bytes\":%lld",
-                         job->need_bytes, job->free_bytes);
+            jbuf_appendf(&j, ",\"need_bytes\":%lld,\"free_bytes\":%lld%s",
+                         job->need_bytes, job->free_bytes,
+                         job->space_install ? ",\"space_install\":true" : "");
         if (job->fail_step[0]) {
             jbuf_append(&j, ",\"fail_step\":");
             jbuf_append_str(&j, job->fail_step);
@@ -2182,7 +2184,8 @@ admit_next(void) {
     dl_job_t          *q = NULL;
     patchdl_manifest_t mf;
     char               murl[768], dest[320], dir[288];
-    int                is_manifest, fd = -1, ok = 0, no_space = 0;
+    int                is_manifest, fd = -1, ok = 0, no_space = 0, space_inst = 0;
+    char               q_title[32];
     unsigned char     *pre_done = NULL;   /* pieces proven good by hash */
     char               fstep[24] = "";
     int                fcurl = 0;
@@ -2205,6 +2208,7 @@ admit_next(void) {
     snprintf(murl, sizeof murl, "%s", q->manifest_url);
     snprintf(dest, sizeof dest, "%s", q->dest);
     snprintf(dir, sizeof dir, "%s", q->dir);
+    snprintf(q_title, sizeof q_title, "%s", q->title_id);
     pthread_mutex_unlock(&g_pool.mtx);
 
     /* ---- network + disk, NO pool lock ---- */
@@ -2218,8 +2222,39 @@ admit_next(void) {
             total = mf.total;
             adopted = adopt_by_size(dir, dest, total);
             need  = space_needed(dest, total);
-            if (!space_ok(dir, need, &free_b)) no_space = 1;
-            else fd = open(dest, O_RDWR | O_CREAT, 0666);
+            /* The install needs about the package's size again on the
+               game's drive. Check that now, before downloading something
+               that can't be installed: on the same drive the download and
+               the install share the free space. */
+            {
+                char        gdir[256] = "";
+                struct stat sd, sg;
+                long long   inst = total + INSTALL_SPACE_MARGIN;
+                int         same;
+                pthread_mutex_lock(&g_mutex);
+                for (size_t i = 0; i < g_title_count; i++)
+                    if (!strcmp(g_titles[i].title_id, q_title)) {
+                        snprintf(gdir, sizeof gdir, "%s", g_titles[i].source_path);
+                        break;
+                    }
+                pthread_mutex_unlock(&g_mutex);
+                same = gdir[0] && stat(dir, &sd) == 0 && stat(gdir, &sg) == 0 &&
+                       sd.st_dev == sg.st_dev;
+                if (!space_ok(dir, need + (same ? inst : 0), &free_b)) {
+                    no_space = 1;
+                    space_inst = same;
+                    if (same) need += inst;
+                } else if (gdir[0] && !same) {
+                    long long gfree = drive_free_mb(gdir) * 1024LL * 1024LL;
+                    if (gfree > 0 && gfree < inst) {
+                        no_space = 1;
+                        space_inst = 1;
+                        need = inst;
+                        free_b = gfree;
+                    }
+                }
+            }
+            if (!no_space) fd = open(dest, O_RDWR | O_CREAT, 0666);
             if (fd >= 0) {
                 struct stat st;
                 if (fstat(fd, &st) == 0) old_size = (long long)st.st_size;
@@ -2293,6 +2328,7 @@ admit_next(void) {
             q->rc = no_space ? -3 : -1;
             q->need_bytes = need;
             q->free_bytes = free_b;
+            q->space_install = space_inst;
             /* the manifest fetch failed: say where, so a report can tell a
                blocked host from a TLS or HTTP problem */
             snprintf(q->fail_step, sizeof q->fail_step, "%s", fstep);

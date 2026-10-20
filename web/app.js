@@ -340,7 +340,7 @@ async function openDiag(titleId) {
     diagRow(Boolean(mf && mf.ok), t("diag.manifest"), mfDetail),
   ];
   if (job) rows.push(diagRow(job.state !== "error", t("diag.lastDownload"),
-    job.state === "error" ? (Number(job.rc) === -3 ? noSpaceText(job.need_bytes, job.free_bytes)
+    job.state === "error" ? (Number(job.rc) === -3 ? noSpaceText(job.need_bytes, job.free_bytes, job.space_install)
       : job.fail_step ? failStepText(job) : t("diag.failedPieces"))
       : tCode("diag.jobState.", job.state, job.state)));
 
@@ -922,7 +922,7 @@ function cardNotesHtml(game) {
   const notes = [];
   const job = state.downloads.find((d) => d.title_id === game.title_id);
   if (job && job.state === "error" && Number(job.rc) === -3)
-    notes.push(`<div class="callout is-warn">${icon("alert")}<span>${escapeHtml(noSpaceText(job.need_bytes, job.free_bytes))}</span></div>`);
+    notes.push(`<div class="callout is-warn">${icon("alert")}<span>${escapeHtml(noSpaceText(job.need_bytes, job.free_bytes, job.space_install))}</span></div>`);
   else if (job && job.state === "error")
     notes.push(`<div class="callout is-warn">${icon("alert")}<span>${escapeHtml(t("card.downloadFailed"))}${job.fail_step ? " " + escapeHtml(failStepText(job)) : ""}</span>
       <button type="button" class="link-button" data-diag="${escapeHtml(game.title_id)}">${t("card.details")}</button></div>`);
@@ -1079,7 +1079,7 @@ function reconcileFromJobs(jobs) {
       // red Cancel stays available to delete the kept partial.
       const bytes = Number(j.bytes) || 0;
       if (Number(j.rc) === -3) {
-        if (!g._spaceWarned) showToast(t("toast.nameMessage", { name: g.name, message: noSpaceText(j.need_bytes, j.free_bytes) }));
+        if (!g._spaceWarned) showToast(t("toast.nameMessage", { name: g.name, message: noSpaceText(j.need_bytes, j.free_bytes, j.space_install) }));
         g._spaceWarned = true;
       } else if (g._wasActive) {
         const why = j.fail_step ? ` ${failStepText(j)}` : "";
@@ -1694,8 +1694,10 @@ async function postJson(url, body) {
 
 // Server refusal reasons are translated as reason.<code> in i18n.js.
 // The server keeps 2 GB free on /data on top of the package itself.
-function noSpaceText(need, free) {
-  return t("reason.noSpace", { need: formatBytes(need), free: formatBytes(free) });
+// install: the download fit, but installing it afterwards wouldn't.
+function noSpaceText(need, free, install) {
+  return t(install ? "reason.noSpaceInstall" : "reason.noSpace",
+    { need: formatBytes(need), free: formatBytes(free) });
 }
 
 function reasonText(error) {
