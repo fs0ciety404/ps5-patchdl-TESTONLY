@@ -63,7 +63,8 @@ gen/web/%.c: web/% scripts/gen_asset_module.py | gen/web
 $(SQLITE_OBJ): $(SQLITE_DIR)/sqlite3.c
 	$(CC) $(SQLITE_CFLAGS) -c -o $@ $<
 
-$(BIN): $(SRCS) $(GEN_SRCS) $(SQLITE_OBJ) $(TILE_ASSETS)
+# Headers too: a changed header (the version string, say) must rebuild.
+$(BIN): $(SRCS) $(wildcard src/*.h) $(GEN_SRCS) $(SQLITE_OBJ) $(TILE_ASSETS)
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(GEN_SRCS) $(SQLITE_OBJ) $(LDADD)
 
 test: $(BIN)
