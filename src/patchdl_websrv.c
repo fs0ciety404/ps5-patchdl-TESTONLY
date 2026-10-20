@@ -955,20 +955,48 @@ queue_pkg_file(struct MHD_Connection *conn, const char *url) {
 
 /* ---------- status JSON ------------------------------------------------- */
 
-/* Free space on the drive holding `path`, in MB. A folder that doesn't
-   exist yet counts as its closest existing parent. 0 if unavailable. */
+/* statvfs of the drive holding `path` (in this process's view). A folder
+   that doesn't exist yet counts as its closest existing parent. */
+static int
+statvfs_up(const char *path, struct statvfs *vfs) {
+    char p[288], *slash;
+    snprintf(p, sizeof p, "%s", path);
+    for (;;) {
+        if (statvfs(p, vfs) == 0) return 0;
+        if (!(slash = strrchr(p, '/')) || slash == p) return -1;
+        *slash = '\0';
+    }
+}
+
+/* Free space on the drive holding `path`, in MB. 0 if unavailable. */
 static long long
 drive_free_mb(const char *path) {
     struct statvfs vfs;
-    char           p[288], *slash;
-    snprintf(p, sizeof p, "%s", path);
-    for (;;) {
-        if (statvfs(p, &vfs) == 0)
-            return (long long)(((unsigned long long)vfs.f_bavail *
-                                (unsigned long long)vfs.f_frsize) / (1024ULL * 1024ULL));
-        if (!(slash = strrchr(p, '/')) || slash == p) return 0;
-        *slash = '\0';
-    }
+    if (statvfs_up(path, &vfs)) return 0;
+    return (long long)(((unsigned long long)vfs.f_bavail *
+                        (unsigned long long)vfs.f_frsize) / (1024ULL * 1024ULL));
+}
+
+/* Free bytes on a game's drive, -1 if it can't be measured. Game paths
+   (/user/app/<id>, /mnt/extN/user/app/<id>) only resolve through the
+   system root the scanner keeps. */
+static long long
+game_free_bytes(const char *game_dir) {
+    struct statvfs vfs;
+    if (!game_dir[0] || patchdl_scan_sys_statvfs(game_dir, &vfs)) return -1;
+    return (long long)((unsigned long long)vfs.f_bavail * (unsigned long long)vfs.f_frsize);
+}
+
+/* The download folder and the game sit on the same drive. The two paths
+   live in different views of the filesystem, so compare the file system
+   id, and failing that its exact size. */
+static int
+same_drive(const char *dl_dir, const char *game_dir) {
+    struct statvfs a, b;
+    if (!game_dir[0] || statvfs_up(dl_dir, &a) || patchdl_scan_sys_statvfs(game_dir, &b))
+        return 0;
+    if (a.f_fsid && a.f_fsid == b.f_fsid) return 1;
+    return a.f_blocks == b.f_blocks && a.f_frsize == b.f_frsize;
 }
 
 /* Free space where new downloads go, in MB. */
@@ -1005,6 +1033,40 @@ space_ok(const char *dir, long long need, long long *free_out) {
     long long free_b = drive_free_mb(dir) * 1024LL * 1024LL;
     if (free_out) *free_out = free_b;
     return need + PATCHDL_SPACE_MARGIN <= free_b;
+}
+
+/* Is there room to download what's missing of a package and then install
+   it? The install needs about the package's size again on the game's drive
+   (game_dir); on the drive of the download folder (dl_dir) the two share
+   the free space. 1 if it fits. Otherwise *need_out / *free_out describe
+   the drive that is short and *for_install says whether the install part
+   made it short. */
+static int
+download_and_install_fit(const char *dl_dir, const char *game_dir,
+                         long long remaining, long long total,
+                         long long *need_out, long long *free_out, int *for_install) {
+    long long inst = total + INSTALL_SPACE_MARGIN, free_b = 0;
+    int       same = same_drive(dl_dir, game_dir);
+
+    *for_install = 0;
+    if (!space_ok(dl_dir, remaining + (same ? inst : 0), &free_b)) {
+        *need_out    = remaining + (same ? inst : 0);
+        *free_out    = free_b;
+        *for_install = same;
+        return 0;
+    }
+    if (game_dir[0] && !same) {
+        long long gfree = game_free_bytes(game_dir);
+        if (gfree >= 0 && gfree < inst) {
+            *need_out    = inst;
+            *free_out    = gfree;
+            *for_install = 1;
+            return 0;
+        }
+    }
+    *need_out = remaining;
+    *free_out = free_b;
+    return 1;
 }
 
 /* Built fresh per request so free space stays live (a 60+ GB download moves
@@ -2227,10 +2289,7 @@ admit_next(void) {
                that can't be installed: on the same drive the download and
                the install share the free space. */
             {
-                char        gdir[256] = "";
-                struct stat sd, sg;
-                long long   inst = total + INSTALL_SPACE_MARGIN;
-                int         same;
+                char gdir[256] = "";
                 pthread_mutex_lock(&g_mutex);
                 for (size_t i = 0; i < g_title_count; i++)
                     if (!strcmp(g_titles[i].title_id, q_title)) {
@@ -2238,21 +2297,9 @@ admit_next(void) {
                         break;
                     }
                 pthread_mutex_unlock(&g_mutex);
-                same = gdir[0] && stat(dir, &sd) == 0 && stat(gdir, &sg) == 0 &&
-                       sd.st_dev == sg.st_dev;
-                if (!space_ok(dir, need + (same ? inst : 0), &free_b)) {
+                if (!download_and_install_fit(dir, gdir, need, total,
+                                              &need, &free_b, &space_inst))
                     no_space = 1;
-                    space_inst = same;
-                    if (same) need += inst;
-                } else if (gdir[0] && !same) {
-                    long long gfree = drive_free_mb(gdir) * 1024LL * 1024LL;
-                    if (gfree > 0 && gfree < inst) {
-                        no_space = 1;
-                        space_inst = 1;
-                        need = inst;
-                        free_b = gfree;
-                    }
-                }
             }
             if (!no_space) fd = open(dest, O_RDWR | O_CREAT, 0666);
             if (fd >= 0) {
@@ -3144,8 +3191,8 @@ do_install(struct MHD_Connection *conn, const char *title_id,
         title_pkg_path(title_id, patch_url, dest, sizeof(dest));
         if (gdir[0] && stat(dest, &pst) == 0) {
             long long need   = (long long)pst.st_size + INSTALL_SPACE_MARGIN;
-            long long free_b = drive_free_mb(gdir) * 1024LL * 1024LL;
-            if (free_b > 0 && free_b < need) {
+            long long free_b = game_free_bytes(gdir);
+            if (free_b >= 0 && free_b < need) {
                 snprintf(resp, sizeof(resp),
                          "{\"ok\":false,\"reason\":\"install_space\","
                          "\"need_bytes\":%lld,\"free_bytes\":%lld}", need, free_b);

@@ -84,6 +84,12 @@ const char *patchdl_scan_step(void);
 /* Read <title dir>/<name> of an installed title (e.g. app.json) through the
    kept system root handle; thread-safe, no working-directory change.
    0 on success with a NUL-terminated buf. */
+/* statvfs of a path as the system sees it (e.g. a game's /user/app/<id>),
+   through the system root kept by the first scan: the process's own root
+   doesn't show those paths. 0 on success. */
+struct statvfs;
+int patchdl_scan_sys_statvfs(const char *path, struct statvfs *out);
+
 int patchdl_scan_read_app_file(const char *title_id, const char *name,
                                char *buf, size_t sz);
 /* Same for an installed PS4 patch: /user/patch/<id>/<name>. */

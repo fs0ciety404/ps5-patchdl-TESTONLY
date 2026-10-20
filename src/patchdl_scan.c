@@ -22,6 +22,7 @@
 #include <string.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 #define MAX_TITLES 512
@@ -681,6 +682,17 @@ read_title_file(const char *const *bases, const char *title_id, const char *name
         return 0;
     }
     return -1;
+}
+
+int
+patchdl_scan_sys_statvfs(const char *path, struct statvfs *out) {
+    int fd, rc;
+    if (g_sysroot_fd < 0 || !path || path[0] != '/') return -1;
+    fd = openat(g_sysroot_fd, path[1] ? path + 1 : ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    rc = fstatvfs(fd, out);
+    close(fd);
+    return rc;
 }
 
 int
