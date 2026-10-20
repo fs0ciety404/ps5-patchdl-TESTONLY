@@ -1547,7 +1547,7 @@ async function doDownload(game) {
   }
 }
 
-async function doInstall(game) {
+async function doInstall(game, force = false) {
   const wasDownloaded = game.downloaded;
   game.installing = true;
   game.installStatus = "starting";
@@ -1555,9 +1555,22 @@ async function doInstall(game) {
   game.downloaded = false; // the package is being consumed by the install
   renderGames();
   try {
-    await postJson(API.action(game.title_id, "install"), {});
+    await postJson(API.action(game.title_id, "install") + (force ? "?force=1" : ""), {});
   } catch (error) {
     game.downloaded = wasDownloaded;   // refused: the package is untouched
+    const b = (error && error.body) || {};
+    if (b.reason === "install_space" && !force) {
+      // Little room on the game's drive: the console would likely stop
+      // right after reading the header. Let the user decide.
+      game.installing = false;
+      renderGames();
+      if (window.confirm(t("install.lowSpace", {
+            name: game.name, need: formatBytes(b.need_bytes), free: formatBytes(b.free_bytes) })))
+        return doInstall(game, true);
+      addLog("log.installBlocked", { id: game.title_id, why: t("reason.install_space") });
+      renderLogs();
+      return false;
+    }
     if (error.body && error.body.reason === "install_running") {
       // Another tab or device started it: follow that install here.
       startInstallPolling();

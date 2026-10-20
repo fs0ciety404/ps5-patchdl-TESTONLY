@@ -983,6 +983,10 @@ data_free_mb(void) {
    internal storage to the last byte. */
 #define PATCHDL_SPACE_MARGIN (2LL * 1024 * 1024 * 1024)
 
+/* Extra room asked for on the game's drive before an install, on top of the
+   package size. A guess: the installer's exact need isn't known. */
+#define INSTALL_SPACE_MARGIN (1LL * 1024 * 1024 * 1024)
+
 /* Bytes still to be written for a package of `total` bytes at `path`: a
    partial from an earlier run already occupies part of it. */
 static long long
@@ -3055,7 +3059,7 @@ static enum MHD_Result
 do_install(struct MHD_Connection *conn, const char *title_id,
            patchdl_source_t src, const char *patch_url, const char *delta_url,
            const char *patch_title_id, const char *patch_storage_title_id,
-           const char *content_id, const char *version, int enabled) {
+           const char *content_id, const char *version, int enabled, int force) {
     char              dest[320], msg[256], resp[720];
     int               rc;
     install_stream_t *st = NULL;
@@ -3086,6 +3090,32 @@ do_install(struct MHD_Connection *conn, const char *title_id,
         return queue_json(conn, MHD_HTTP_CONFLICT, stat(dest, &pst) == 0
                           ? "{\"ok\":false,\"reason\":\"download_unverified\"}"
                           : "{\"ok\":false,\"reason\":\"download_incomplete\"}");
+    }
+
+    /* The console writes the update next to the game and needs about the
+       package's size free there; with less, its installer reads the header
+       and quietly stops. Ask before starting (force = the user said go). */
+    if (!force) {
+        char        gdir[256] = "";
+        struct stat pst;
+        pthread_mutex_lock(&g_mutex);
+        for (size_t i = 0; i < g_title_count; i++)
+            if (!strcmp(g_titles[i].title_id, title_id)) {
+                snprintf(gdir, sizeof gdir, "%s", g_titles[i].source_path);
+                break;
+            }
+        pthread_mutex_unlock(&g_mutex);
+        title_pkg_path(title_id, patch_url, dest, sizeof(dest));
+        if (gdir[0] && stat(dest, &pst) == 0) {
+            long long need   = (long long)pst.st_size + INSTALL_SPACE_MARGIN;
+            long long free_b = drive_free_mb(gdir) * 1024LL * 1024LL;
+            if (free_b > 0 && free_b < need) {
+                snprintf(resp, sizeof(resp),
+                         "{\"ok\":false,\"reason\":\"install_space\","
+                         "\"need_bytes\":%lld,\"free_bytes\":%lld}", need, free_b);
+                return queue_json_owned(conn, MHD_HTTP_CONFLICT, strdup(resp));
+            }
+        }
     }
 
     /* GUARD (app layer): the version.xml target title id must match the game. */
@@ -3447,10 +3477,12 @@ handle_title_action(struct MHD_Connection *conn, const char *url) {
         return queue_json(conn, MHD_HTTP_ACCEPTED,
                           "{\"ok\":true,\"queued\":true,\"action\":\"check\"}");
 
-    if (!strcmp(action, "install"))
+    if (!strcmp(action, "install")) {
+        const char *f = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "force");
         return do_install(conn, title_id, src, patch_url, delta_url,
                           patch_title_id, patch_storage_title_id,
-                          content_id, version, enabled);
+                          content_id, version, enabled, f && !strcmp(f, "1"));
+    }
 
     return queue_text(conn, MHD_HTTP_NOT_FOUND, "not found");
 }
