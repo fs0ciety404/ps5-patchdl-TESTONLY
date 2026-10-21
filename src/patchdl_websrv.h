@@ -11,3 +11,6 @@
 
 int patchdl_websrv_start(unsigned short port);
 void patchdl_websrv_stop(void);
+/* Restart the web server if its port stopped accepting connections.
+   Returns 1 after a restart, 0 if all was well, -1 if the restart failed. */
+int patchdl_websrv_watch(void);

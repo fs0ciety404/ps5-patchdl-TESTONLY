@@ -33,12 +33,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <poll.h>
+#include <errno.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/mount.h>
 #include <unistd.h>
 
 static struct MHD_Daemon *web_daemon;
+static unsigned          g_web_restarts; /* times the watch restarted it */
 
 static patchdl_fw_t     g_fw;
 static patchdl_title_t *g_titles;
@@ -1165,12 +1168,14 @@ build_status_json(void) {
              "\"titles_gen\":%lu,"
              "\"downloads_bytes\":%lld,"
              "\"rescan_ms\":[%ld,%ld,%ld],"
-             "\"rescan_step\":\"%s / %s\",\"rescan_running_ms\":%ld}",
+             "\"rescan_step\":\"%s / %s\",\"rescan_running_ms\":%ld,"
+             "\"web_restarts\":%u}",
              g_fw.str, g_fw.bin, data_free_mb(), root, ip, PATCHDL_HTTP_PORT,
              PATCHDL_VERSION, titles_gen(), downloads_bytes(),
              g_rescan_ms[0], g_rescan_ms[1], g_rescan_ms[2],
              g_rescan_step, patchdl_scan_step(),
-             strcmp(g_rescan_step, "idle") ? mono_ms() - g_rescan_since : 0L);
+             strcmp(g_rescan_step, "idle") ? mono_ms() - g_rescan_since : 0L,
+             g_web_restarts);
     return out;
 }
 
@@ -4371,6 +4376,27 @@ scan_watch_thread(void *arg) {
 
 /* ---------- lifecycle -------------------------------------------------- */
 
+static unsigned short web_port;
+
+static struct MHD_Daemon *
+start_web_daemon(unsigned short port) {
+    return MHD_start_daemon(
+        MHD_USE_INTERNAL_POLLING_THREAD | MHD_USE_THREAD_PER_CONNECTION,
+        port, NULL, NULL, &on_request, NULL,
+        MHD_OPTION_NOTIFY_COMPLETED, request_completed, NULL,
+        /* DoS guards + RAM caps: the PS5 process budget is a few hundred MB
+           and the default pthread stack on this libc is multiple MB. We're
+           a single-user UI — 8 concurrent connections is plenty for the
+           SSE poll + a couple of AJAX, and 256 KB per worker is more than
+           enough for our handlers (largest stack use is a 16 KB sidecar
+           buffer in seed_from_sidecar). */
+        MHD_OPTION_CONNECTION_LIMIT,        (unsigned int)8,
+        MHD_OPTION_PER_IP_CONNECTION_LIMIT, (unsigned int)8,
+        MHD_OPTION_CONNECTION_TIMEOUT,      (unsigned int)30,
+        MHD_OPTION_THREAD_STACK_SIZE,       (size_t)(512 * 1024),
+        MHD_OPTION_END);
+}
+
 int
 patchdl_websrv_start(unsigned short port) {
     if (web_daemon) return 0;
@@ -4449,21 +4475,8 @@ patchdl_websrv_start(unsigned short port) {
         }
     }
 
-    web_daemon = MHD_start_daemon(
-        MHD_USE_INTERNAL_POLLING_THREAD | MHD_USE_THREAD_PER_CONNECTION,
-        port, NULL, NULL, &on_request, NULL,
-        MHD_OPTION_NOTIFY_COMPLETED, request_completed, NULL,
-        /* DoS guards + RAM caps: the PS5 process budget is a few hundred MB
-           and the default pthread stack on this libc is multiple MB. We're
-           a single-user UI — 8 concurrent connections is plenty for the
-           SSE poll + a couple of AJAX, and 256 KB per worker is more than
-           enough for our handlers (largest stack use is a 16 KB sidecar
-           buffer in seed_from_sidecar). */
-        MHD_OPTION_CONNECTION_LIMIT,        (unsigned int)8,
-        MHD_OPTION_PER_IP_CONNECTION_LIMIT, (unsigned int)8,
-        MHD_OPTION_CONNECTION_TIMEOUT,      (unsigned int)30,
-        MHD_OPTION_THREAD_STACK_SIZE,       (size_t)(512 * 1024),
-        MHD_OPTION_END);
+    web_port   = port;
+    web_daemon = start_web_daemon(port);
 
     if (!web_daemon) {
         pthread_mutex_lock(&g_pool.mtx);
@@ -4508,6 +4521,58 @@ patchdl_websrv_start(unsigned short port) {
     }
 
     return 0;
+}
+
+/* Can a client still connect to the web UI? A loopback connect that is
+   refused means the listening socket is gone; a timeout or any other error
+   says nothing about it. */
+static int
+listener_refused(unsigned short port) {
+    struct sockaddr_in sa;
+    struct pollfd      pfd;
+    int                fd, err = 0, refused = 0;
+    socklen_t          len = sizeof err;
+
+    if ((fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) return 0;
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+    memset(&sa, 0, sizeof sa);
+    sa.sin_family      = AF_INET;
+    sa.sin_port        = htons(port);
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (!connect(fd, (struct sockaddr *)&sa, sizeof sa)) {
+        close(fd);
+        return 0;
+    }
+    if (errno == ECONNREFUSED) {
+        refused = 1;
+    } else if (errno == EINPROGRESS) {
+        pfd.fd     = fd;
+        pfd.events = POLLOUT;
+        if (poll(&pfd, 1, 2000) == 1 &&
+            !getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len))
+            refused = err == ECONNREFUSED;
+    }
+    close(fd);
+    return refused;
+}
+
+/* The console drops listening sockets when the network changes (Wi-Fi off
+   and on, cable pulled). The process keeps running but nobody can connect
+   any more, so start the web server again. */
+int
+patchdl_websrv_watch(void) {
+    struct MHD_Daemon *d = NULL;
+
+    if (!web_daemon || !listener_refused(web_port)) return 0;
+    printf("PatchDL web server stopped accepting, restarting it\n");
+    MHD_stop_daemon(web_daemon);
+    web_daemon = NULL;
+    for (int i = 0; i < 5 && !(d = start_web_daemon(web_port)); i++)
+        sleep(1);
+    web_daemon = d;
+    if (d) g_web_restarts++;
+    printf("PatchDL web server restart %s\n", d ? "done" : "failed");
+    return d ? 1 : -1;
 }
 
 void

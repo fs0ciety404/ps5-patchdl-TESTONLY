@@ -52,7 +52,8 @@ main(int argc, char** argv) {
   patchdl_notify_startup(port);
 
   while(1) {
-    sleep(60);
+    sleep(5);
+    patchdl_websrv_watch();
   }
 
   return 0;
