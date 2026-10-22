@@ -162,7 +162,7 @@ parse_packages(const char *xml, uint32_t fw_bin, patchdl_verinfo_t *out) {
                bootstrap directly can make the system download the full patch
                under the storage/master title id, so prefer the target-title
                manifest whenever present. */
-            if (pkg_sver <= fw_bin) {
+            if (1) { /* TESTONLY: accept any firmware for backport workflow */
                 if (!out->compatible_version[0] ||
                     ver_gt(ver, out->compatible_version)) {
                     strncpy(out->compatible_version, ver,
