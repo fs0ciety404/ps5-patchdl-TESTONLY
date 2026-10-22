@@ -3967,9 +3967,10 @@ on_request(void *cls, struct MHD_Connection *conn, const char *url,
                      mf.count, mf.total);
         for (int i = 0; i < mf.count; i++) {
             if (i) jbuf_append(&j, ",");
-            jbuf_appendf(&j, "{\"o\":%lld,\"s\":%lld,\"h\":\"%s\",\"u\":\"%s\"}",
-                         mf.pieces[i].offset, mf.pieces[i].size, mf.pieces[i].hash,
-                         mf.pieces[i].url ? mf.pieces[i].url : "");
+            jbuf_appendf(&j, "{\"o\":%lld,\"s\":%lld,\"h\":\"%s\",\"u\":",
+                         mf.pieces[i].offset, mf.pieces[i].size, mf.pieces[i].hash);
+            jbuf_append_str(&j, mf.pieces[i].url ? mf.pieces[i].url : "");
+            jbuf_append(&j, "}");
         }
         jbuf_append(&j, "]}");
         patchdl_manifest_free(&mf);
