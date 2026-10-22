@@ -8,6 +8,8 @@
   <img src="https://img.shields.io/badge/fork-TESTONLY-ef4444?style=for-the-badge" alt="TESTONLY fork">
   <img src="https://img.shields.io/badge/FW%20filter-DISABLED-ef4444?style=for-the-badge" alt="Firmware filter disabled">
   <img src="https://img.shields.io/badge/manifest-piece%20URLs%20exposed-f59e0b?style=for-the-badge" alt="Per-piece CDN URLs exposed in /api/manifest">
+  <img src="https://img.shields.io/badge/fetch--piece-on%20demand-f59e0b?style=for-the-badge" alt="Fetch a single manifest piece on demand">
+  <img src="https://img.shields.io/badge/UI-Pieces%20sheet-f59e0b?style=for-the-badge" alt="New Pieces modal in the Web UI">
   <img src="https://img.shields.io/badge/upstream-knutwurst%2Fps5--patchdl-22c55e?style=for-the-badge" alt="Upstream: knutwurst/ps5-patchdl">
 </p>
 
@@ -15,8 +17,9 @@
 
 ## ⚠️ What changed vs upstream
 
-Two surgical patches, both small and both inside the server; the Web UI,
-installer and download pool are untouched.
+Four local changes — two server patches, one new server endpoint, and one
+small Web UI addition. The install path, the download pool, the Prospero
+integration and every other upstream behaviour are left untouched.
 
 ### 1. Firmware-compatibility filter removed
 
@@ -54,6 +57,57 @@ against `"h"` and reassemble the package byte-perfectly — useful when the
 console's connection is slow or when the patch is tens of GB and you'd
 rather use a desktop.
 
+### 3. Single-piece fetch endpoint
+
+**New** `GET /api/fetch_piece/<title_id>/<idx>`
+(`src/patchdl_websrv.c`, next to the existing `/api/manifest/` handler):
+
+```http
+GET /api/fetch_piece/PPSA04029/25
+
+{ "ok": true,
+  "idx": 25,
+  "size": 131334144,
+  "got":  131334144,
+  "sha_ok": true,
+  "sha_got":  "731cc814…",
+  "sha_want": "731cc814…",
+  "path": "/data/patchdl/PPSA04029/pieces/piece_25.bin",
+  "url":  "https://sgst.prod.dl.playstation.net/sgst/prod/.../_sc.pkg" }
+```
+
+Streams one piece from the title's manifest to
+`/data/patchdl/<title_id>/pieces/piece_<idx>.bin`, SHA-256 verifies it
+against the hash the manifest declares, and reports back. It stays out of
+the main download pool, so it can be used while a normal download is paused
+or finished — most useful to grab the single `sgst.*` piece (the signed
+`_sc.pkg`, which needs the console's client cert) in isolation while the
+large `gst.*` CDN chunks are pulled off-console.
+
+### 4. "Pieces" modal in the Web UI
+
+A new **Pieces** button appears on every title card, next to the existing
+*Other versions* button. It opens a sheet with:
+
+- One row per manifest piece: index, host (green **gst** / amber **sgst**),
+  size, short SHA-256, source filename.
+- Per-row `Copy URL` and `Fetch` (calls `/api/fetch_piece/…`, shows the
+  SHA check result inline).
+- A toolbar with three one-click actions:
+  - **Export Metalink (CDN)** — downloads a Metalink v4 (`.metalink`)
+    file listing only the public `gst.*` chunks with sizes, SHA-256s and
+    URLs; drop it into aria2 (`aria2c -x16 -j25 --check-integrity=true -i`)
+    or any Metalink-aware downloader on another machine.
+  - **Copy all CDN URLs** — copies the plain `gst.*` URL list to the
+    clipboard.
+  - **Fetch _sc.pkg only** — finds the single `sgst.*` piece in the
+    manifest and calls the fetch endpoint for it; the 131 MB sidecar is
+    cached under `/data/patchdl/<tid>/pieces/`.
+
+Nothing in this sheet changes install behaviour; it only surfaces data the
+backend already fetches and adds a convenient way to pull one specific
+piece without draining the whole pool.
+
 ### What this unlocks
 
 - `latest_compatible` and `compatible_url` get populated for patches above
@@ -66,6 +120,12 @@ rather use a desktop.
 - `GET /api/manifest/<title_id>` now returns, for every chunk, the direct
   `gst.prod.dl.playstation.net` URL — enabling off-console assembly against
   Sony's own SHA-256 hashes.
+- `GET /api/fetch_piece/<title_id>/<idx>` can grab a single piece on
+  demand (so the mTLS-only `_sc.pkg` can be fetched without pulling the
+  rest of the patch through the console's uplink).
+- The new **Pieces** sheet in the Web UI exposes all of the above as
+  one-click actions — including a Metalink export of the public CDN
+  chunks, ready to feed to any desktop downloader.
 
 ### What this does **not** change
 
@@ -93,13 +153,16 @@ You are expected to:
 Do not install updates that need a firmware newer than yours just because
 you can; most of them won't work.
 
-### No new features, no new UI
+### Everything else is upstream
 
-The web UI, API surface, firmware range (1.00–13.60), launch instructions
-and screenshots are **exactly those of the upstream project** — only the
-compatibility gate inside `verxml` is relaxed. Everything else below this
-section is the upstream README, kept verbatim so the setup steps still
-apply.
+The firmware range (1.00–13.60), launch instructions, settings, i18n and
+screenshots are **exactly those of the upstream project**. The only
+additions in this fork are the two source-level patches, the extra
+`/api/fetch_piece/<tid>/<idx>` endpoint and the "Pieces" sheet in the Web
+UI described above — the download pool, installer, auto-update loop,
+Prospero Patches integration and configuration format are untouched.
+Everything else below this section is the upstream README, kept verbatim
+so the setup steps still apply.
 
 ---
 
@@ -116,10 +179,11 @@ If you find this useful, please support the original author:
   <a href="https://paypal.me/oliverkoester"><img src="https://img.shields.io/badge/Donate%20to%20knutwurst-PayPal-22c55e?style=flat-square&logo=paypal&logoColor=white" alt="Donate to knutwurst via PayPal"></a>
 </p>
 
-This fork touches two short regions of upstream source (firmware filter and
-`/api/manifest` response). Please file issues about PatchDL functionality
-itself upstream; only report issues here if they are specifically about one
-of the two local changes.
+This fork adds four local changes on top of upstream — the firmware
+filter, the `/api/manifest` response, the new `/api/fetch_piece` endpoint
+and the Web UI "Pieces" sheet. Please file issues about PatchDL
+functionality itself upstream; only report issues here if they are
+specifically about one of those local changes.
 
 ---
 
