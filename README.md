@@ -7,6 +7,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/fork-TESTONLY-ef4444?style=for-the-badge" alt="TESTONLY fork">
   <img src="https://img.shields.io/badge/FW%20filter-DISABLED-ef4444?style=for-the-badge" alt="Firmware filter disabled">
+  <img src="https://img.shields.io/badge/manifest-piece%20URLs%20exposed-f59e0b?style=for-the-badge" alt="Per-piece CDN URLs exposed in /api/manifest">
   <img src="https://img.shields.io/badge/upstream-knutwurst%2Fps5--patchdl-22c55e?style=for-the-badge" alt="Upstream: knutwurst/ps5-patchdl">
 </p>
 
@@ -14,7 +15,12 @@
 
 ## ⚠️ What changed vs upstream
 
-**Single-line patch** in `src/patchdl_verxml.c` (around line 165):
+Two surgical patches, both small and both inside the server; the Web UI,
+installer and download pool are untouched.
+
+### 1. Firmware-compatibility filter removed
+
+**`src/patchdl_verxml.c`** (around line 165):
 
 ```diff
 -            if (pkg_sver <= fw_bin) {
@@ -26,6 +32,28 @@ the installed firmware (`required_fw > fw_bin`). This fork removes that filter
 so every patch Sony returns in `version.xml` is treated as a `compatible`
 candidate — regardless of the firmware it asks for.
 
+### 2. Per-piece CDN URLs exposed in `/api/manifest/<tid>`
+
+**`src/patchdl_websrv.c`** (`/api/manifest` handler):
+
+```diff
+-            jbuf_appendf(&j, "{\"o\":%lld,\"s\":%lld,\"h\":\"%s\"}",
+-                         mf.pieces[i].offset, mf.pieces[i].size, mf.pieces[i].hash);
++            jbuf_appendf(&j, "{\"o\":%lld,\"s\":%lld,\"h\":\"%s\",\"u\":\"%s\"}",
++                         mf.pieces[i].offset, mf.pieces[i].size, mf.pieces[i].hash,
++                         mf.pieces[i].url ? mf.pieces[i].url : "");
+```
+
+Upstream `/api/manifest/<tid>` returns each piece's offset, size and SHA-256,
+but not its CDN URL — those come from Sony's `_sc.pkg` manifest, which only
+the console cert can fetch from `sgst.prod.dl.playstation.net`. This fork
+adds `"u"` (the per-piece URL on `gst.prod.dl.playstation.net`, served over
+plain HTTPS with no client cert) next to the hash so an external downloader
+(FDM, aria2, curl) on the same LAN can pull the chunks directly, verify them
+against `"h"` and reassemble the package byte-perfectly — useful when the
+console's connection is slow or when the patch is tens of GB and you'd
+rather use a desktop.
+
 ### What this unlocks
 
 - `latest_compatible` and `compatible_url` get populated for patches above
@@ -35,6 +63,9 @@ candidate — regardless of the firmware it asks for.
 - You get the real `_sc.pkg` manifest URL for a brand-new patch straight
   from Sony's own `sgst.prod.dl.playstation.net` (using the console's cert),
   without waiting for third-party scrapers like Prospero Patches to index it.
+- `GET /api/manifest/<title_id>` now returns, for every chunk, the direct
+  `gst.prod.dl.playstation.net` URL — enabling off-console assembly against
+  Sony's own SHA-256 hashes.
 
 ### What this does **not** change
 
@@ -85,9 +116,10 @@ If you find this useful, please support the original author:
   <a href="https://paypal.me/oliverkoester"><img src="https://img.shields.io/badge/Donate%20to%20knutwurst-PayPal-22c55e?style=flat-square&logo=paypal&logoColor=white" alt="Donate to knutwurst via PayPal"></a>
 </p>
 
-This fork touches a single line of upstream source. Please file issues about
-PatchDL functionality itself upstream; only report issues here if they are
-specifically about the firmware-filter change.
+This fork touches two short regions of upstream source (firmware filter and
+`/api/manifest` response). Please file issues about PatchDL functionality
+itself upstream; only report issues here if they are specifically about one
+of the two local changes.
 
 ---
 
