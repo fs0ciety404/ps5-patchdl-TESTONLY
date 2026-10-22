@@ -1,3 +1,102 @@
+<h1 align="center">PatchDL — TESTONLY fork</h1>
+
+<p align="center">
+  <strong>Unofficial fork of <a href="https://github.com/knutwurst/ps5-patchdl">knutwurst/ps5-patchdl</a> with the firmware-compatibility filter removed.</strong>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/fork-TESTONLY-ef4444?style=for-the-badge" alt="TESTONLY fork">
+  <img src="https://img.shields.io/badge/FW%20filter-DISABLED-ef4444?style=for-the-badge" alt="Firmware filter disabled">
+  <img src="https://img.shields.io/badge/upstream-knutwurst%2Fps5--patchdl-22c55e?style=for-the-badge" alt="Upstream: knutwurst/ps5-patchdl">
+</p>
+
+---
+
+## ⚠️ What changed vs upstream
+
+**Single-line patch** in `src/patchdl_verxml.c` (around line 165):
+
+```diff
+-            if (pkg_sver <= fw_bin) {
++            if (1) { /* TESTONLY: accept any firmware for backport workflow */
+```
+
+The upstream build hides patches whose declared firmware requirement is above
+the installed firmware (`required_fw > fw_bin`). This fork removes that filter
+so every patch Sony returns in `version.xml` is treated as a `compatible`
+candidate — regardless of the firmware it asks for.
+
+### What this unlocks
+
+- `latest_compatible` and `compatible_url` get populated for patches above
+  your current firmware too, so the download/install endpoints
+  (`/api/titles/<tid>/download`, `/api/titles/<tid>/install`) stop replying
+  with `no_compatible_patch`.
+- You get the real `_sc.pkg` manifest URL for a brand-new patch straight
+  from Sony's own `sgst.prod.dl.playstation.net` (using the console's cert),
+  without waiting for third-party scrapers like Prospero Patches to index it.
+
+### What this does **not** change
+
+- Only games installed from disc or the PlayStation Store are still eligible
+  (shadowmount / unknown / fake sources are rejected upstream).
+- Install still needs the game to be present under the matching TitleID.
+- The install itself is handed to the console's own installer, which may
+  reject the package via its own checks.
+- Nothing is modified in the game, Sony's keys or the system software.
+
+### Why "TESTONLY"
+
+**This fork is intended as a research / backport-workflow aid for packages
+you legally own.** The upstream firmware filter exists for a good reason:
+installing a patch that was built for a firmware you don't have usually
+produces a game that doesn't launch, crashes, or (worst case) corrupts save
+data in a way that even reinstalling the previous patch cannot recover.
+You are expected to:
+
+- Only use this on titles **you have purchased** on your account.
+- Back up any save you care about before the first launch after a backport.
+- Keep the original package handy so you can roll back if the patched game
+  refuses to run.
+
+Do not install updates that need a firmware newer than yours just because
+you can; most of them won't work.
+
+### No new features, no new UI
+
+The web UI, API surface, firmware range (1.00–13.60), launch instructions
+and screenshots are **exactly those of the upstream project** — only the
+compatibility gate inside `verxml` is relaxed. Everything else below this
+section is the upstream README, kept verbatim so the setup steps still
+apply.
+
+---
+
+## Credit
+
+All of PatchDL — the payload, the web UI, the Prospero Patches integration,
+the parallel downloader, the installer glue, the ten-language i18n and the
+documentation — is the work of **[knutwurst](https://github.com/knutwurst)**
+([ps5-patchdl](https://github.com/knutwurst/ps5-patchdl)).
+
+If you find this useful, please support the original author:
+
+<p>
+  <a href="https://paypal.me/oliverkoester"><img src="https://img.shields.io/badge/Donate%20to%20knutwurst-PayPal-22c55e?style=flat-square&logo=paypal&logoColor=white" alt="Donate to knutwurst via PayPal"></a>
+</p>
+
+This fork touches a single line of upstream source. Please file issues about
+PatchDL functionality itself upstream; only report issues here if they are
+specifically about the firmware-filter change.
+
+---
+
+<p align="center">
+  — Upstream README follows below, unchanged —
+</p>
+
+---
+
 <h1 align="center">PatchDL</h1>
 
 <p align="center">
@@ -46,7 +145,6 @@ A few things it does on top of that:
 - The interface is available in ten languages.
 
 PatchDL only updates games installed from disc or the PlayStation Store. It doesn't download games, and it doesn't touch system software.
-
 ## Screenshots
 
 <table>
