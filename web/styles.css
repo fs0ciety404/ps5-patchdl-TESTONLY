@@ -1090,3 +1090,22 @@ pre {
   .vrow .row-button { padding: 0 14px; }
   .vrow .row-button svg { display: none; }
 }
+
+/* ---- TESTONLY: pieces sheet ---- */
+.pieces-sheet { max-width: min(96vw, 1100px); }
+.piece-summary { margin: 0 0 10px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.pill.is-green { border-color: rgba(56,193,114,0.34); background: var(--green-soft); color: var(--green-dark); }
+.pill.is-amber { border-color: rgba(242,184,75,0.38); background: var(--amber-soft); color: var(--amber); }
+.piece-toolbar { display: flex; gap: 8px; margin: 10px 0; flex-wrap: wrap; }
+.piece-table-wrap { overflow: auto; max-height: 60vh; border: 1px solid var(--line); border-radius: 10px; }
+.piece-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.piece-table th, .piece-table td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--line); }
+.piece-table thead th { position: sticky; top: 0; background: var(--panel); z-index: 1; }
+.piece-table tbody tr.piece-sgst { background: rgba(242,184,75,0.08); }
+.piece-table code { font-size: 12px; }
+.piece-file { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.piece-status { font-size: 12px; opacity: 0.75; margin-left: 6px; }
+@media (max-width: 640px) {
+  .piece-table th:nth-child(4), .piece-table td:nth-child(4) { display: none; }
+  .piece-file { max-width: 160px; }
+}

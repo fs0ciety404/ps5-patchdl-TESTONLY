@@ -141,6 +141,8 @@ document.addEventListener("DOMContentLoaded", () => {
     if (b) openDiag(b.dataset.diag);
     const v = e.target.closest("[data-versions]");
     if (v) openVersions(v.dataset.versions);
+    const p = e.target.closest("[data-pieces]");
+    if (p) openPieces(p.dataset.pieces);
   });
   window.addEventListener("hashchange", openDiagFromHash);
 });
@@ -283,6 +285,144 @@ function openDiagFromHash() {
   history.replaceState(null, "", location.pathname + location.search);
   if (m[1] === "diag") openDiag(m[2]);
   else openVersions(m[2]);
+}
+
+async function openPieces(titleId) {
+  let data;
+  try {
+    const r = await fetch(`/api/manifest/${encodeURIComponent(titleId)}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    data = await r.json();
+  } catch (e) {
+    openSheet(
+      `<header class="guide-head"><h2 id="pieces-title">Pieces — ${escapeHtml(titleId)}</h2>${closeButtonHtml()}</header>
+       <div class="guide-body"><p>Manifest fetch failed: ${escapeHtml(String(e))}</p></div>`,
+      "pieces-title", "pieces-sheet");
+    return;
+  }
+  const pcs = data.pieces || [];
+  const total = data.total || 0;
+  const hostOf = (u) => { try { return new URL(u).host; } catch { return ""; } };
+  const fileOf = (u) => { try { return decodeURIComponent(new URL(u).pathname.split("/").pop()); } catch { return ""; } };
+  const bytes = (n) => {
+    const u = ["B","KiB","MiB","GiB"]; let i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return `${n.toFixed(i < 2 ? 0 : 2)} ${u[i]}`;
+  };
+  const rows = pcs.map((p, i) => {
+    const h = hostOf(p.u);
+    const sg = h.startsWith("sgst.");
+    return `<tr data-idx="${i}" class="${sg ? "piece-sgst" : "piece-cdn"}">
+      <td>${i}</td>
+      <td><span class="pill ${sg ? "is-amber" : "is-green"}">${escapeHtml(h)}</span></td>
+      <td>${bytes(p.s)}</td>
+      <td><code title="${escapeHtml(p.h)}">${escapeHtml((p.h || "").slice(0,12))}…</code></td>
+      <td class="piece-file"><code title="${escapeHtml(p.u)}">${escapeHtml(fileOf(p.u))}</code></td>
+      <td>
+        <button class="row-button is-ghost piece-copy" data-u="${escapeHtml(p.u)}">Copy URL</button>
+        <button class="row-button is-ghost piece-fetch" data-tid="${escapeHtml(titleId)}" data-idx="${i}">Fetch</button>
+        <span class="piece-status"></span>
+      </td>
+    </tr>`;
+  }).join("");
+
+  const cdnCount = pcs.filter(p => !hostOf(p.u).startsWith("sgst.")).length;
+  const scCount = pcs.length - cdnCount;
+
+  const html =
+    `<header class="guide-head">
+       <h2 id="pieces-title">Pieces — ${escapeHtml(titleId)}</h2>
+       ${closeButtonHtml()}
+     </header>
+     <div class="guide-body">
+       <p class="piece-summary">
+         ${pcs.length} pieces · ${bytes(total)} total ·
+         <span class="pill is-green">${cdnCount} CDN</span>
+         <span class="pill is-amber">${scCount} sgst (mTLS)</span>
+       </p>
+       <div class="piece-toolbar">
+         <button class="row-button is-ghost" id="piece-export-ml">Export Metalink (CDN)</button>
+         <button class="row-button is-ghost" id="piece-copy-cdn">Copy all CDN URLs</button>
+         <button class="row-button is-ghost" id="piece-fetch-sc">Fetch _sc.pkg only</button>
+       </div>
+       <div class="piece-table-wrap">
+         <table class="piece-table">
+           <thead><tr><th>#</th><th>Host</th><th>Size</th><th>SHA-256</th><th>File</th><th>Actions</th></tr></thead>
+           <tbody>${rows}</tbody>
+         </table>
+       </div>
+     </div>`;
+
+  openSheet(html, "pieces-title", "pieces-sheet");
+
+  const sheet = document.querySelector(".guide.pieces-sheet");
+  if (!sheet) return;
+
+  sheet.addEventListener("click", async (e) => {
+    const cp = e.target.closest(".piece-copy");
+    if (cp) {
+      try { await navigator.clipboard.writeText(cp.dataset.u); cp.textContent = "Copied"; setTimeout(() => cp.textContent = "Copy URL", 1500); }
+      catch { cp.textContent = "Copy failed"; }
+      return;
+    }
+    const ft = e.target.closest(".piece-fetch");
+    if (ft) {
+      const row = ft.closest("tr");
+      const st = row.querySelector(".piece-status");
+      ft.disabled = true; st.textContent = " fetching…";
+      try {
+        const r = await fetch(`/api/fetch_piece/${encodeURIComponent(ft.dataset.tid)}/${encodeURIComponent(ft.dataset.idx)}`);
+        const j = await r.json();
+        st.textContent = j.ok ? ` ok (${bytes(j.got)}, sha ✓)` : ` fail: ${j.reason || (j.sha_ok ? "" : "sha mismatch")}`;
+      } catch (err) {
+        st.textContent = ` error: ${err}`;
+      } finally {
+        ft.disabled = false;
+      }
+    }
+  });
+
+  sheet.querySelector("#piece-export-ml").addEventListener("click", () => {
+    const cdn = pcs.filter(p => !hostOf(p.u).startsWith("sgst."));
+    const xml = [`<?xml version="1.0" encoding="UTF-8"?>`,
+                 `<metalink xmlns="urn:ietf:params:xml:ns:metalink">`];
+    for (const p of cdn) {
+      xml.push(`  <file name="${escapeHtml(fileOf(p.u))}">`);
+      xml.push(`    <size>${p.s}</size>`);
+      xml.push(`    <hash type="sha-256">${p.h}</hash>`);
+      xml.push(`    <url priority="1">${escapeHtml(p.u)}</url>`);
+      xml.push(`  </file>`);
+    }
+    xml.push(`</metalink>`);
+    const blob = new Blob([xml.join("\n")], { type: "application/metalink4+xml" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${titleId}_patch_${cdn.length}.metalink`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  });
+
+  sheet.querySelector("#piece-copy-cdn").addEventListener("click", async (ev) => {
+    const list = pcs.filter(p => !hostOf(p.u).startsWith("sgst.")).map(p => p.u).join("\n");
+    try { await navigator.clipboard.writeText(list); ev.target.textContent = "Copied all"; setTimeout(() => ev.target.textContent = "Copy all CDN URLs", 1500); }
+    catch { ev.target.textContent = "Copy failed"; }
+  });
+
+  sheet.querySelector("#piece-fetch-sc").addEventListener("click", async (ev) => {
+    const sc = pcs.findIndex(p => hostOf(p.u).startsWith("sgst."));
+    if (sc < 0) { ev.target.textContent = "no sgst piece"; return; }
+    ev.target.disabled = true;
+    ev.target.textContent = "fetching _sc.pkg…";
+    try {
+      const r = await fetch(`/api/fetch_piece/${encodeURIComponent(titleId)}/${sc}`);
+      const j = await r.json();
+      ev.target.textContent = j.ok ? `_sc.pkg ok (${bytes(j.got)}, sha ✓)` : `fail: ${j.reason || "sha mismatch"}`;
+    } catch (err) {
+      ev.target.textContent = `error: ${err}`;
+    } finally {
+      ev.target.disabled = false;
+    }
+  });
 }
 
 async function fetchJson(url) {
@@ -797,6 +937,15 @@ function createGameCard(game) {
     btn.className = "row-button is-ghost";
     btn.dataset.versions = game.title_id;
     btn.innerHTML = `${icon("layers")}<span>${t("versions.title")}</span>`;
+    actions.appendChild(btn);
+  }
+  if (game.compatible_version || game.latest_version) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "row-button is-ghost";
+    btn.dataset.pieces = game.title_id;
+    btn.title = "Per-piece manifest + offline fetch (TESTONLY)";
+    btn.innerHTML = `${icon("layers")}<span>Pieces</span>`;
     actions.appendChild(btn);
   }
 

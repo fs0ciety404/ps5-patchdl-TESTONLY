@@ -3978,6 +3978,87 @@ on_request(void *cls, struct MHD_Connection *conn, const char *url,
                                 j.buf ? j.buf : strdup("{}"));
     }
 
+    /* Fetch ONE piece from the title's manifest and verify its SHA-256.
+       GET /api/fetch_piece/<title_id>/<idx>. The piece is streamed to
+       /data/patchdl/<title_id>/pieces/piece_<idx>.bin and verified against
+       the hash the manifest declares. No install, no concurrency with the
+       main download pool. */
+    if (!strncmp(url, "/api/fetch_piece/", 17)) {
+        const char *rest = url + 17;
+        const char *slash = strchr(rest, '/');
+        char tid[32];
+        int  idx;
+        if (!slash || (size_t)(slash - rest) >= sizeof tid)
+            return queue_text(conn, MHD_HTTP_BAD_REQUEST, "bad request");
+        memcpy(tid, rest, (size_t)(slash - rest));
+        tid[slash - rest] = '\0';
+        idx = atoi(slash + 1);
+        if (!path_segment_safe(tid))
+            return queue_text(conn, MHD_HTTP_FORBIDDEN, "forbidden");
+
+        char purl[768] = {0}, durl_[512] = {0};
+        char pti[32], psti[32], cid[64], nm[128], ver[16];
+        patchdl_source_t src;
+        int en;
+        if (!get_title_action_info(tid, &src, purl, sizeof purl,
+                                   durl_, sizeof durl_,
+                                   pti, sizeof pti,
+                                   psti, sizeof psti, cid, sizeof cid,
+                                   nm, sizeof nm, ver, sizeof ver, &en) || !purl[0])
+            return queue_json(conn, MHD_HTTP_NOT_FOUND,
+                              "{\"ok\":false,\"reason\":\"no patch_url for title\"}");
+
+        patchdl_manifest_t mf;
+        memset(&mf, 0, sizeof mf);
+        if (patchdl_fetch_manifest(purl, &mf) != 0)
+            return queue_json(conn, MHD_HTTP_BAD_GATEWAY,
+                              "{\"ok\":false,\"reason\":\"manifest fetch failed\"}");
+        if (idx < 0 || idx >= mf.count) {
+            patchdl_manifest_free(&mf);
+            return queue_json(conn, MHD_HTTP_BAD_REQUEST,
+                              "{\"ok\":false,\"reason\":\"idx out of range\"}");
+        }
+
+        char dir[256], subdir[288], dest[384];
+        title_dir(tid, dir, sizeof dir);
+        snprintf(subdir, sizeof subdir, "%s/pieces", dir);
+        make_title_dir(subdir);
+        snprintf(dest, sizeof dest, "%s/piece_%d.bin", subdir, idx);
+
+        long long got = 0;
+        int rc = patchdl_http_download(mf.pieces[idx].url, dest, &got);
+
+        int sha_ok = 0;
+        char sha_hex[65] = {0};
+        if (rc == 0) {
+            int fd = open(dest, O_RDONLY);
+            if (fd >= 0) {
+                if (patchdl_hash_fd_region(fd, 0, got,
+                                           mf.pieces[idx].hash, sha_hex) == 0 &&
+                    strcasecmp(sha_hex, mf.pieces[idx].hash) == 0)
+                    sha_ok = 1;
+                close(fd);
+            }
+        }
+
+        jbuf_t j = {0};
+        jbuf_appendf(&j, "{\"ok\":%s,\"idx\":%d,\"size\":%lld,\"got\":%lld,"
+                         "\"sha_ok\":%s,\"sha_got\":\"%s\",\"sha_want\":\"%s\",\"path\":",
+                     (rc == 0 && sha_ok) ? "true" : "false",
+                     idx, mf.pieces[idx].size, got,
+                     sha_ok ? "true" : "false",
+                     sha_hex, mf.pieces[idx].hash);
+        jbuf_append_str(&j, dest);
+        jbuf_append(&j, ",\"url\":");
+        jbuf_append_str(&j, mf.pieces[idx].url);
+        jbuf_append(&j, "}");
+        patchdl_manifest_free(&mf);
+        return queue_json_owned(conn,
+                                (rc == 0 && sha_ok) ? MHD_HTTP_OK
+                                                    : MHD_HTTP_BAD_GATEWAY,
+                                j.buf ? j.buf : strdup("{}"));
+    }
+
     /* Read-only: SHA-256 every piece of the on-disk .pkg and compare to Sony's
        manifest hashes — proves whether the assembled file is byte-correct. No
        install. Hashing runs on-device (SSD), so no multi-GB transfer. */
